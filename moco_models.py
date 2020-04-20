@@ -8,7 +8,7 @@ import torchvision.models as models
 
 
 class MoCoV2(nn.Module):
-    def __init__(self, base_encoder, similarity_dim=128, q_size=65536, momentum=0.999, temperature=0.07, ):
+    def __init__(self, base_encoder, similarity_dim=128, q_size=128*64, momentum=0.999, temperature=0.07, ):
         super(MoCoV2, self).__init__()
         self.K = q_size
         self.m = momentum
@@ -71,7 +71,7 @@ class MoCoV2(nn.Module):
 
     def momentum_update(self, ):
         for q_param, k_param in zip(self.q_enc.parameters(), self.k_enc.parameters()):
-            k_param.data = self.m * k_param.data + (1 - self.m) * q_param
+            k_param.data = self.m * k_param.data + (1 - self.m) * q_param.data
 
 
     def replace_queue_with(self, simil_vec_k):

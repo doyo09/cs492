@@ -26,8 +26,12 @@ parser = argparse.ArgumentParser(description='Pretraining MoCo')
 parser.add_argument('--imResize', default=256, type=int, help='')
 parser.add_argument('--imsize', default=224, type=int, help='')
 
-parser.add_argument('--epochs', type=int, default=10, help='number of epochs to train (default: 200)')
-parser.add_argument('--batch_size', default=64, type=int, help='')
+parser.add_argument('--epochs', type=int, default=200, help='number of epochs to train (default: 200)')
+parser.add_argument('--batch_size', default=128, type=int, help='BS')
+
+parser.add_argument('--lr', default=1e-3, type=int, help='learning rate')
+parser.add_argument('--sgd_momentum', default=.9, type=int, help='sgd momentum')
+parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay',dest='weight_decay')
 
 parser.add_argument('--print_every', default=10, type=int, help='')
 
@@ -73,6 +77,10 @@ def main():
     print('found {} train, {} validation and {} unlabeled images'.format(len(train_ids), len(val_ids), len(unl_ids)))
     # 비교를 위해 val_ids를 제외한다.
     # 훈련시에는 모든 unl_ids 사용
+
+    # just to overfit
+    # unl_ids = unl_ids[:128]
+    #
     moco_trainloader = MoCoImageLoader(DATASET_PATH, 'train', np.setdiff1d(unl_ids, val_ids),# unl_ids if you fully train moco
                                        # simCLR style transform
                                        transform=transforms.Compose([
@@ -115,15 +123,14 @@ def main():
     print("Using {d}".format(d = device))
 
     ###### set model ######
-    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet50"])
+    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet50"],)
     moco_v2.to(device)
     print("model set")
 
     ###### set optimizer, criterion ######
-    optimizer = torch.optim.Adam(params = moco_v2.parameters(),
-                                 lr = 1e-3,
-                                 # need to tune hyperparams
-                                 )
+    optimizer = torch.optim.SGD(moco_v2.parameters(), opts.lr,
+                                momentum=opts.sgd_momentum,
+                                weight_decay=opts.weight_decay)
     criterion = nn.CrossEntropyLoss().to(device)
     print("optimizer are criterion are set")
 
@@ -151,10 +158,11 @@ def main():
 
             loss.backward()
             optimizer.step()
+            # print(loss.item())
 
             if batch_idx % opts.print_every == opts.print_every  - 1 :
-
-                print("Train Epoch:{}, [{}/{}] Loss:{:.4f}/[avg: {:.4f}]".format(e,\
+                # print(moco_v2.queue, moco_v2.queue_pointer)
+                print("Train Epoch:{}, [{}/{}] Loss:{:.4f}/[avg: {:.4f}]".format(e+1,\
                                                                          batch_idx*opts.batch_size, \
                                                                          len(moco_trainloader.dataset),\
                                                                          loss_hist.val, loss_hist.avg))
