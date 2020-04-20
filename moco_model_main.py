@@ -156,6 +156,7 @@ def main():
             loss = criterion(output, labels)
             loss_hist.update(val = loss.item(), n = opts.batch_size)
 
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             # print(loss.item())
