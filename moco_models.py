@@ -156,10 +156,8 @@ class MoCoClassifier(nn.Module):
         x = img
         for layer_name, layer in self.moco_model._modules.items():
             x = layer(x)
-            print(layer_name)
             if layer_name == "avgpool":
                 break
-        print(x.size())
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
