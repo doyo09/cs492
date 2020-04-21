@@ -123,7 +123,7 @@ def main():
     print("Using {d}".format(d = device))
 
     ###### set model ######
-    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet50"],)
+    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet50"], q_size=128*280)
     moco_v2.to(device)
     print("model set")
 
@@ -148,6 +148,7 @@ def main():
             """
             @param img_q, img_k : (bs,3,224,224) 
             """
+
             img_q, img_k = img_q.to(device), img_k.to(device)
             # output : (bs, K+1); labels : (bs,)
             output, labels = moco_v2(img_q, img_k)
@@ -156,8 +157,12 @@ def main():
             loss = criterion(output, labels)
             loss_hist.update(val = loss.item(), n = opts.batch_size)
 
+            optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            if e == 0 : # and batch_idx < 64:
+                print("not updating until queue is full")
+            else :
+                optimizer.step()
             # print(loss.item())
 
             if batch_idx % opts.print_every == opts.print_every  - 1 :
@@ -166,6 +171,8 @@ def main():
                                                                          batch_idx*opts.batch_size, \
                                                                          len(moco_trainloader.dataset),\
                                                                          loss_hist.val, loss_hist.avg))
+
+
 if __name__ == "__main__":
     main()
 

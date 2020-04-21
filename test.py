@@ -1,7 +1,0 @@
-print("hello")
-print("master")
-print("exp_moco")
-print("after localremote")
-print("hello there")
-print("master")
-print("branch")
