@@ -29,7 +29,7 @@ parser.add_argument('--imsize', default=224, type=int, help='')
 parser.add_argument('--epochs', type=int, default=200, help='number of epochs to train (default: 200)')
 parser.add_argument('--batch_size', default=128, type=int, help='BS')
 
-parser.add_argument('--lr', default=1e-3, type=int, help='learning rate')
+parser.add_argument('--lr', default=.03, type=int, help='learning rate')
 parser.add_argument('--sgd_momentum', default=.9, type=int, help='sgd momentum')
 parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay',dest='weight_decay')
 
@@ -69,7 +69,7 @@ def split_ids(path, ratio):
 
 
 def main():
-    print(torch.__version__)
+    print("torch version : ", torch.__version__)
     global opts
     opts = parser.parse_args()
 
@@ -87,8 +87,8 @@ def main():
                                            transforms.Resize(opts.imResize),
                                            transforms.RandomResizedCrop(opts.imsize),
                                            # transforms.RandomApply([
-                                           #     transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
-                                           #      ], p=0.8),
+                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),  # not strengthened
+                                                # ], p=0.8),
                                            transforms.RandomGrayscale(p=0.2),
                                            # gaussian blur should be added
                                            transforms.RandomHorizontalFlip(),
@@ -104,8 +104,8 @@ def main():
                                            transforms.Resize(opts.imResize),
                                            transforms.RandomResizedCrop(opts.imsize),
                                            # transforms.RandomApply([
-                                           #     transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
-                                           #      ], p=0.8),
+                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),  # not strengthened
+                                                # ], p=0.8),
                                            transforms.RandomGrayscale(p=0.2),
                                            # gaussian blur should be added
                                            transforms.RandomHorizontalFlip(),
