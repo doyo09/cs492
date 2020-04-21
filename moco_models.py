@@ -86,7 +86,7 @@ class MoCoV2(nn.Module):
 
 class Resnet50(nn.Module):
     # baseline for 첫번째 비교
-    def __init__(self, base_encoder, num_classes = 256):
+    def __init__(self, base_encoder, num_classes = 265):
         super(Resnet50, self).__init__()
 
         self.model_ft = base_encoder()  # torchvision.models.__dict__['resnet50']
@@ -107,7 +107,7 @@ class Resnet50(nn.Module):
 
 # for experiment1
 class LinearProtocol(nn.Module):
-    def __init__(self, input_dim = 2048, class_num=256,):  # 512
+    def __init__(self, input_dim = 2048, class_num=265,):  # 512
         super(LinearProtocol, self).__init__()
         self.fc = nn.Linear(in_features= input_dim, out_features= class_num)
     def forward(self, x) :
@@ -118,7 +118,7 @@ class ClassifierBlock(nn.Module):
     """
     mixmatch에 사용할 모델입니다.
     """
-    def __init__(self, input_dim=2048, class_num=256, dropout=True, relu=True, num_bottleneck=512):  # 512
+    def __init__(self, input_dim=2048, class_num=265, dropout=True, relu=True, num_bottleneck=512):  # 512
         super(ClassifierBlock, self).__init__()
         add_block = []
         add_block += [nn.Linear(input_dim, num_bottleneck)]

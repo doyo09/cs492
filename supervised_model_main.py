@@ -12,8 +12,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from moco_dataloader import MoCoImageLoader, SupervisedImageLoader
-from moco_models import MoCoV2
+from moco_dataloader import SupervisedImageLoader
+from moco_models import Resnet50
 from utils import AverageMeter, bind_nsml
 
 import argparse
@@ -21,7 +21,7 @@ import argparse
 ######################################################################
 # Options
 ######################################################################
-parser = argparse.ArgumentParser(description='Pretraining MoCo')
+parser = argparse.ArgumentParser(description='Pretraining supervised encoder for EXPERIMENT1')
 
 parser.add_argument('--imResize', default=256, type=int, help='')
 parser.add_argument('--imsize', default=224, type=int, help='')
@@ -35,7 +35,7 @@ parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight dec
 
 parser.add_argument('--print_every', default=10, type=int, help='')
 
-parser.add_argument('--name',default='MoCoV2', type=str, help='output model name')
+parser.add_argument('--name',default='Resnet for Experiment1', type=str, help='output model name')
 parser.add_argument('--save_epoch', type=int, default=10, help='saving epoch interval')
 
 ### DO NOT MODIFY THIS BLOCK ###
@@ -78,8 +78,8 @@ def main():
 
     train_ids, val_ids, unl_ids = split_ids(os.path.join(DATASET_PATH, 'train/train_label'), 0.2)
     print('found {} train, {} validation and {} unlabeled images'.format(len(train_ids), len(val_ids), len(unl_ids)))
-    
-    moco_trainloader = MoCoImageLoader(DATASET_PATH, 'train', np.setdiff1d(unl_ids, val_ids),# unl_ids if you fully train moco
+
+    res_trainloader = SupervisedImageLoader(DATASET_PATH, 'train', train_ids,
                                        # simCLR style transform
                                        transform=transforms.Compose([
                                            transforms.Resize(opts.imResize),
@@ -92,11 +92,11 @@ def main():
                                            transforms.RandomHorizontalFlip(),
                                            transforms.ToTensor(),
                                            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ]))
-    print("len(moco_trainloader) :", len(moco_trainloader), )
-    moco_trainloader = torch.utils.data.DataLoader(moco_trainloader, batch_size=opts.batch_size, shuffle=True,
+    print("len(res_trainloader) :", len(res_trainloader), )
+    res_trainloader = torch.utils.data.DataLoader(res_trainloader, batch_size=opts.batch_size, shuffle=True,
                                                    pin_memory=True, drop_last=True) # num_workers = 4
 
-    moco_valloader = MoCoImageLoader(DATASET_PATH, 'val', val_ids,
+    res_valloader = SupervisedImageLoader(DATASET_PATH, 'val', val_ids,
                                      # simCLR style transform
                                      transform=transforms.Compose([
                                            transforms.Resize(opts.imResize),
@@ -111,9 +111,9 @@ def main():
                                            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ]))
 
 
-    print("len(moco_valloader) :", len(moco_valloader), )
-    moco_valloader = torch.utils.data.DataLoader(moco_valloader, batch_size=opts.batch_size, shuffle=False,
-                                                   pin_memory=True, drop_last=False) 
+    print("len(res_valloader) :", len(res_valloader), )
+    res_valloader = torch.utils.data.DataLoader(res_valloader, batch_size=opts.batch_size, shuffle=False,
+                                                   pin_memory=True, drop_last=False) # num_workers = 4
     print('train_loaders done')
 
     ###### set device, model ######
@@ -121,12 +121,12 @@ def main():
     print("Using {d}".format(d = device))
 
     ###### set model ######
-    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet50"], q_size=128*280)
-    moco_v2.to(device)
+    resnet50 = Resnet50(base_encoder=models.__dict__["resnet50"],)
+    resnet50.to(device)
     print("model set")
 
     ###### set optimizer, criterion ######
-    optimizer = torch.optim.SGD(moco_v2.parameters(), opts.lr,
+    optimizer = torch.optim.SGD(resnet50.parameters(), opts.lr,
                                 momentum=opts.sgd_momentum,
                                 weight_decay=opts.weight_decay)
     criterion = nn.CrossEntropyLoss().to(device)
@@ -134,7 +134,7 @@ def main():
 
     ### DO NOT MODIFY THIS BLOCK ###
     if IS_ON_NSML:
-        bind_nsml(moco_v2)
+        bind_nsml(resnet50)
         if opts.pause:
             nsml.paused(scope=locals())
     ################################
@@ -144,50 +144,48 @@ def main():
 
     for e in range(opts.epochs):
         loss_hist = AverageMeter()
-        for batch_idx, (img_q, img_k) in enumerate(moco_trainloader):
+        for batch_idx, (imgs, labels) in enumerate(res_trainloader):
             """
-            @param img_q, img_k : (bs,3,224,224) 
+            @param imgs : (bs,3,224,224) 
             """
+            imgs, labels = imgs.to(device), labels.to(device)
 
-            img_q, img_k = img_q.to(device), img_k.to(device)
-            # output : (bs, K+1); labels : (bs,)
-            output, labels = moco_v2(img_q, img_k)
-            output, labels = output.to(device), labels.to(device)
+            output = resnet50(imgs,)
+            output = output.to(device)
 
             loss = criterion(output, labels)
+
             loss_hist.update(val = loss.item(), n = opts.batch_size)
 
             optimizer.zero_grad()
             loss.backward()
-            if e == 0 : # and batch_idx < 64:
-                print("not updating until queue is full")
-            else :
-                optimizer.step()
-            # print(loss.item())
+
+            optimizer.step()
+
 
             if batch_idx % opts.print_every == opts.print_every  - 1 :
-                # print(moco_v2.queue, moco_v2.queue_pointer)
+
                 print("Train Epoch:{}, [{}/{}] Loss:{:.4f}/[avg: {:.4f}]".format(e+1,\
                                                                          batch_idx*opts.batch_size, \
-                                                                         len(moco_trainloader.dataset),\
+                                                                         len(res_trainloader.dataset),\
                                                                          loss_hist.val, loss_hist.avg))
-            if i % opts.print_every == 0:
+            if i % opts.print_every == opts.print_every - 1:
                 nsml.report(step=i, loss=loss_hist.val, loss_avg=loss_hist.avg)
             i += 1
 
-        if loss_hist.val < best_loss:
-            print('saving best checkpoint...')
-            if IS_ON_NSML:
+        if loss_hist.val < best_loss :
+            print("saving best checkpoint... ")
+            if IS_ON_NSML :
                 nsml.save(opts.name + '_best')
-            else:
-                torch.save(moco_v2.state_dict(), os.path.join('runs', opts.name + '_best'))
-        # auto save
-        if (e + 1) % opts.save_epoch == 0:
-            print('autosave...')
-            if IS_ON_NSML:
+            else :
+                torch.save(resnet50.state_dict(), os.path.join('runs',opts.name+'_best'))
+        # auto save on a basis of epoch interval
+        if (e+1) % opts.save_epoch == 0:
+            print("auto save ...")
+            if IS_ON_NSML :
                 nsml.save(opts.name + '_e{}'.format(e))
-            else:
-                torch.save(moco_v2.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(e)))
+            else :
+                torch.save(resnet50.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(e)))
 
         best_loss = min(loss_hist.val, best_loss)
 
