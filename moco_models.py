@@ -83,3 +83,82 @@ class MoCoV2(nn.Module):
         self.queue[:, self.queue_pointer:self.queue_pointer + bs] = simil_vec_k.T
         self.queue_pointer = (self.queue_pointer + bs) % self.K
 
+
+class Resnet50(nn.Module):
+    # baseline for 첫번째 비교
+    def __init__(self, base_encoder, num_classes = 256):
+        super(Resnet50, self).__init__()
+
+        self.model_ft = base_encoder()  # torchvision.models.__dict__['resnet50']
+
+        # same architecture as moco
+        in_features = self.model_ft.fc.weight.size(1)
+        self.model_ft.fc = nn.Sequential(nn.Linear(in_features=in_features, out_features=in_features),
+                                         nn.ReLU(),
+                                         nn.Linear(in_features=in_features, out_features=num_classes)
+                                         )
+
+    def forward(self, img):
+        """
+        @param img : from SupervisedImageLoader (bs, 3, 224, 224)
+        """
+        logits = self.model_ft(img)
+        return logits
+
+# for experiment1
+class LinearProtocol(nn.Module):
+    def __init__(self, input_dim = 2048, class_num=256,):  # 512
+        super(LinearProtocol, self).__init__()
+        self.fc = nn.Linear(in_features= input_dim, out_features= class_num)
+    def forward(self, x) :
+        return self.fc(x)
+
+# for building the whole model
+class ClassifierBlock(nn.Module):
+    """
+    mixmatch에 사용할 모델입니다.
+    """
+    def __init__(self, input_dim=2048, class_num=256, dropout=True, relu=True, num_bottleneck=512):  # 512
+        super(ClassifierBlock, self).__init__()
+        add_block = []
+        add_block += [nn.Linear(input_dim, num_bottleneck)]
+        add_block += [nn.BatchNorm1d(num_bottleneck)]
+        if relu:
+            add_block += [nn.ReLU()]
+        if dropout:
+            add_block += [nn.Dropout(p=0.5)]
+        add_block = nn.Sequential(*add_block)
+        # add_block.apply(weights_init_kaiming)
+        classifier = []
+        classifier += [nn.Linear(num_bottleneck, class_num)]
+        classifier = nn.Sequential(*classifier)
+        # classifier.apply(weights_init_classifier)
+        self.add_block = add_block
+        self.classifier = classifier
+
+    def forward(self, x):
+        x = self.add_block(x)
+        x = self.classifier(x)
+        return x
+
+# for experiment1 & building the whole model
+class MoCoClassifier(nn.Module):
+    def __init__(self, moco_model, classifier):
+        """
+        @param moco_model : moco_model.q_enc + moco_model.k_enc
+        @param classifier : Classifier block for real mix model or Linear for linear protocol
+        """
+        super(MoCoClassifier, self).__init__()
+        self.moco_model = moco_model.q_enc
+        self.classifier = classifier
+
+    def forward(self, img):
+        x = img
+        for layer_name, layer in self.moco_model._modules.items():
+            x = layer(x)
+            if layer_name == "avgpool":
+                break
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
