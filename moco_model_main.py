@@ -87,7 +87,7 @@ def main():
                                            transforms.Resize(opts.imResize),
                                            transforms.RandomResizedCrop(opts.imsize),
                                            # transforms.RandomApply([
-                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),  # not strengthened
+                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),  # not strengthened
                                                 # ], p=0.8),
                                            transforms.RandomGrayscale(p=0.2),
                                            # gaussian blur should be added
@@ -104,7 +104,7 @@ def main():
                                            transforms.Resize(opts.imResize),
                                            transforms.RandomResizedCrop(opts.imsize),
                                            # transforms.RandomApply([
-                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),  # not strengthened
+                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),  # not strengthened
                                                 # ], p=0.8),
                                            transforms.RandomGrayscale(p=0.2),
                                            # gaussian blur should be added
