@@ -35,6 +35,9 @@ parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight dec
 
 parser.add_argument('--print_every', default=10, type=int, help='')
 
+parser.add_argument('--name',default='MoCoV2', type=str, help='output model name')
+parser.add_argument('--save_epoch', type=int, default=10, help='saving epoch interval')
+
 ### DO NOT MODIFY THIS BLOCK ###
 # arguments for nsml
 parser.add_argument('--pause', type=int, default=0)
@@ -141,9 +144,11 @@ def main():
             nsml.paused(scope=locals())
     ################################
 
-    loss_hist = AverageMeter()
+    i = 0
+    best_loss = float("inf")
 
     for e in range(opts.epochs):
+        loss_hist = AverageMeter()
         for batch_idx, (img_q, img_k) in enumerate(moco_trainloader):
             """
             @param img_q, img_k : (bs,3,224,224) 
@@ -171,7 +176,25 @@ def main():
                                                                          batch_idx*opts.batch_size, \
                                                                          len(moco_trainloader.dataset),\
                                                                          loss_hist.val, loss_hist.avg))
+            if i % opts.print_every == 0:
+                nsml.report(step=i, loss=loss_hist.val, loss_avg=loss_hist.avg)
+            i += 1
 
+        if loss_hist.val < best_loss:
+            print('saving best checkpoint...')
+            if IS_ON_NSML:
+                nsml.save(opts.name + '_best')
+            else:
+                torch.save(moco_v2.state_dict(), os.path.join('runs', opts.name + '_best'))
+        # auto save
+        if (e + 1) % opts.save_epoch == 0:
+            print('autosave...')
+            if IS_ON_NSML:
+                nsml.save(opts.name + '_e{}'.format(e))
+            else:
+                torch.save(moco_v2.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(e)))
+
+        best_loss = min(loss_hist.val, best_loss)
 
 if __name__ == "__main__":
     main()
