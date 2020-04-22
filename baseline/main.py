@@ -197,6 +197,7 @@ parser.add_argument('--lossXent', type=float, default=1, help='lossWeight for Xe
 # arguments for logging and backup
 parser.add_argument('--log_interval', type=int, default=10, metavar='N', help='logging training status')
 parser.add_argument('--save_epoch', type=int, default=50, help='saving epoch interval')
+parser.add_argument('--print_every', default=10, type=int, help='')
 
 # hyper-parameters for mix-match
 parser.add_argument('--alpha', default=0.75, type=float)
@@ -209,6 +210,7 @@ parser.add_argument('--pause', type=int, default=0)
 parser.add_argument('--mode', type=str, default='train')
 ################################
 
+step = 0
 def main():
     global opts
     opts = parser.parse_args()
@@ -319,9 +321,10 @@ def main():
                     nsml.save(opts.name + '_e{}'.format(epoch))
                 else:
                     torch.save(model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
+            nsml.report(step=step, acc_top1=acc_top1, acc_top5=acc_top5)
 
-                
 def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu):
+    global step
     losses = AverageMeter()
     losses_x = AverageMeter()
     losses_un = AverageMeter()
@@ -433,7 +436,9 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         if batch_idx % opts.log_interval == 0:
             print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) '.format( 
                 epoch, batch_idx *inputs_x.size(0), len(train_loader.dataset), losses.val, losses.avg, acc_top1.val, acc_top1.avg, acc_top5.val, acc_top5.avg))
-        
+        if step % opts.print_every == opts.print_every - 1:
+            nsml.report(step=step, loss=loss.item(), loss_avg=(avg_loss/nCnt))
+        step += 1
         nCnt += 1 
         
     avg_loss =  float(avg_loss/nCnt)
