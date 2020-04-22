@@ -143,7 +143,7 @@ class ClassifierBlock(nn.Module):
 
 # for experiment1 & building the whole model
 class MoCoClassifier(nn.Module):
-    def __init__(self, moco_model, classifier):
+    def __init__(self, moco_model, classifier, use_bn = False):
         """
         @param moco_model : moco_model.q_enc + moco_model.k_enc
         @param classifier : Classifier block for real mix model or Linear for linear protocol
@@ -151,6 +151,9 @@ class MoCoClassifier(nn.Module):
         super(MoCoClassifier, self).__init__()
         self.moco_model = moco_model.q_enc
         self.classifier = classifier
+        if use_bn :
+            self.BN = nn.BatchNorm1d()
+
 
     def forward(self, img):
         x = img
@@ -158,7 +161,28 @@ class MoCoClassifier(nn.Module):
             x = layer(x)
             if layer_name == "avgpool":
                 break
-        x = x.view(x.size(0), -1)
+        x = F.relu(x.view(x.size(0), -1))
         x = self.classifier(x)
         return x
+
+class ResnetClassifier(nn.Module):
+    def __init__(self, resnet, classifier):
+        """
+        @param resnet : resnet50
+        @param classifier : Classifier block for real mix model or Linear for linear protocol
+        """
+        super(ResnetClassifier, self).__init__()
+        self.resnet = resnet.model_ft
+        self.classifier = classifier
+
+    def forward(self, img):
+        x = img
+        for layer_name, layer in self.resnet._modules.items():
+            x = layer(x)
+            if layer_name == "avgpool":
+                break
+        x = F.relu(x.view(x.size(0), -1))
+        x = self.classifier(x)
+        return x
+
 

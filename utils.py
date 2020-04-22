@@ -1,8 +1,9 @@
 from moco_dataloader import MoCoImageLoader
 import nsml
-from nsml import DATASET_PATH, IS_ON_NSML
-import os
 
+import os
+import torch
+import numpy as np
 import time
 
 class AverageMeter(object):
@@ -69,4 +70,16 @@ def bind_nsml(model):
 
     nsml.bind(save=save, load=load, infer=infer)
 
+def top_n_accuracy_score(y_true, y_prob, n=5, normalize=True):
+    num_obs, num_labels = y_prob.shape
+    idx = num_labels - n - 1
+    counter = 0
+    argsorted = np.argsort(y_prob, axis=1)
+    for i in range(num_obs):
+        if y_true[i] in argsorted[i, idx+1:]:
+            counter += 1
+    if normalize:
+        return counter * 1.0 / num_obs
+    else:
+        return counter
 
