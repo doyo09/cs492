@@ -23,7 +23,7 @@ import torchvision.models as models
 from torchvision import datasets, transforms
 
 from moco_dataloader import MixMatchImageLoader
-from utils import AverageMeter, bind_nsml, split_ids
+from utils import AverageMeter, bind_nsml, split_ids, get_tsa_threshold
 from moco_models import Resnet50, ResnetClassifier, ClassifierBlock
 from baseline.models import Res18_basic, Res50
 
@@ -101,10 +101,46 @@ def interleave(xy, batch):
     return [torch.cat(v, dim=0) for v in xy]
 
 class SemiLoss(object):
-    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, final_epoch):
-        probs_u = torch.softmax(outputs_u, dim=1)
-        Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
-        Lu = torch.mean((probs_u - targets_u) ** 2)
+    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, final_epoch,
+                 step, total_steps, # tsa related params
+                 ood_mask_pct = .3, # ood related params : need to tune between .3 and .6
+                 is_tsa = True, is_ood = True):
+        # sup_loss
+        if is_tsa :
+            probs_sup = torch.softmax(outputs_x, dim=1) # (N,C)
+            probs_sup = torch.sum(probs_sup * targets_x, dim = 1) #(N,C) -> (N,)
+            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps)
+            larger_than_threshold = probs_sup > tsa_threshold
+            loss_mask = torch.ones(targets_x.size(0), dtype=torch.float32).cuda() * (1-larger_than_threshold.type(torch.float32)).cuda()
+            Lx = -torch.sum(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1) * loss_mask)
+            Lx = Lx/ torch.sum(loss_mask,)
+            # print("tsa_threshold is ", tsa_threshold.item(),
+            #       "we mask ", targets_x.size(0) - torch.sum(loss_mask).item(), "out of ", targets_x.size(0),
+            #       "Lx : ", Lx.item())
+        else :
+            Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
+
+        # unlabel_loss
+        # Lu = loss_l2u, logits_y = outputs_u, labels_y = targets_u
+        probs_u = torch.softmax(outputs_u, dim=1) #(N,C)
+
+        if is_ood:
+            largest_probs, _ = torch.max(probs_u, dim = 1) # largest_prob : (N,)
+            sorted_probs, _ = torch.sort(largest_probs, descending = False) #ascending probs : (N,)
+            sort_index =  int(ood_mask_pct * sorted_probs.size(0)) # num of indice we need to mask
+            ood_moving_threshold =  sorted_probs[sort_index]
+            ood_mask = (largest_probs > ood_moving_threshold).type(torch.float32).cuda() # (N,) if false, mask them
+
+            mse_loss = (probs_u - targets_u) ** 2 # (N,C)
+            mse_loss = mse_loss * (ood_mask.unsqueeze(1).expand(mse_loss.size(0), mse_loss.size(1))) # (N,C)
+            Lu = torch.sum(mse_loss) / (torch.sum(ood_mask,) * NUM_CLASSES)
+            # print("sort_index : ", sort_index, ", ood_moving_thrh : ", ood_moving_threshold.item(),
+            #       ", we mask ", targets_u.size(0) - torch.sum(ood_mask).item(), "out of ", targets_u.size(0),
+            #       ", Lu : ", Lu.item())
+
+        else : # not using ood
+            Lu = torch.mean((probs_u - targets_u) ** 2)
+
         return Lx, Lu, opts.lambda_u * linear_rampup(epoch, final_epoch)
 
 
@@ -168,9 +204,9 @@ def main():
 
     # Set model
     # model = Res18_basic(NUM_CLASSES)
-    model = Res50(NUM_CLASSES)
-    # resnet = Resnet50(base_encoder=models.__dict__["resnet18"])
-    # model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=False, init=True)
+    # model = Res50(NUM_CLASSES)
+    resnet = Resnet50(base_encoder=models.__dict__["resnet50"])
+    model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=False, init=True)
     model.eval()
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -237,16 +273,21 @@ def main():
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 150], gamma=0.1)
 
         # Train and Validation
+        train_i = 0 # for nsml.report
+        val_i = 0
+
         best_acc = -1
+
         for epoch in range(opts.start_epoch, opts.epochs + 1):
             print('start training')
-            loss, _, _ = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
+            loss, train_acc_top1, train_acc_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu, train_i)
             scheduler.step()
 
             print('start validation')
-            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu)
+            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu, val_i)
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
+
             if is_best:
                 print('saving best checkpoint...')
                 if IS_ON_NSML:
@@ -260,7 +301,7 @@ def main():
                     torch.save(model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
 
 
-def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu):
+def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu, train_i):
     losses = AverageMeter()
     losses_x = AverageMeter()
     losses_un = AverageMeter()
@@ -346,7 +387,13 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
 
         loss_x, loss_un, weigts_mixing = criterion(logits_x, mixed_target[:batch_size], logits_u,
                                                    mixed_target[batch_size:], epoch + batch_idx / len(train_loader),
-                                                   opts.epochs)
+                                                   opts.epochs,
+                                                   step= int((epoch + batch_idx / len(train_loader)) * (len(train_loader.dataset)/batch_size)),
+                                                   total_steps= int(opts.epochs *(len(train_loader.dataset)/batch_size)),
+                                                   ood_mask_pct=.3, # ood related params : need to tune between .3 and .6
+                                                   is_tsa = True,
+                                                   is_ood=True
+                                                   )
         loss = loss_x + weigts_mixing * loss_un
 
         losses.update(loss.item(), inputs_x.size(0))
@@ -378,6 +425,10 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
 
         nCnt += 1
 
+        ###### nsml report ######
+        nsml.report(step=train_i, train_loss=loss.item(), train_acc_top1=acc_top1b, train_acc_top5=acc_top5b,)
+        train_i += 1
+
     avg_loss = float(avg_loss / nCnt)
     avg_top1 = float(avg_top1 / nCnt)
     avg_top5 = float(avg_top5 / nCnt)
@@ -385,7 +436,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
     return avg_loss, avg_top1, avg_top5
 
 
-def validation(opts, validation_loader, model, epoch, use_gpu):
+def validation(opts, validation_loader, model, epoch, use_gpu, val_i):
     model.eval()
     avg_top1 = 0.0
     avg_top5 = 0.0
@@ -407,6 +458,10 @@ def validation(opts, validation_loader, model, epoch, use_gpu):
         avg_top1 = float(avg_top1 / nCnt)
         avg_top5 = float(avg_top5 / nCnt)
         print('Test Epoch:{} Top1_acc_val:{:.2f}% Top5_acc_val:{:.2f}% '.format(epoch, avg_top1, avg_top5))
+        ###### nsml report ######
+        nsml.report(step=val_i, val_acc_top1=acc_top1, val_acc_top5=acc_top5, )
+        val_i += 1
+
     return avg_top1, avg_top5
 
 

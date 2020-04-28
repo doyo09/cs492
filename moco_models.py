@@ -5,7 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision.models as models
-
+def weights_init_classifier(m):
+    classname = m.__class__.__name__
+    if classname.find('Linear') != -1:
+        nn.init.normal_(m.weight.data, std=0.001)
+        nn.init.constant_(m.bias.data, 0.0)
 
 class MoCoV2(nn.Module):
     def __init__(self, base_encoder, similarity_dim=128, q_size=128*64, momentum=0.999, temperature=0.07, ):
@@ -23,6 +27,7 @@ class MoCoV2(nn.Module):
                                       nn.Linear(in_features=in_features, out_features=similarity_dim))
         self.k_enc.fc = nn.Sequential(nn.Linear(in_features, in_features), nn.ReLU(),
                                       nn.Linear(in_features=in_features, out_features=similarity_dim))
+        self.q_enc.apply(weights_init_classifier)
 
         # initialize k_enc params
         for q, k in zip(self.q_enc.parameters(), self.k_enc.parameters()):
@@ -34,6 +39,8 @@ class MoCoV2(nn.Module):
         self.register_buffer("queue_pointer", torch.tensor(0, dtype=torch.long))
 
         self.queue = F.normalize(self.queue, dim=0)
+
+
 
     def forward(self, img_q, img_k):
         """
@@ -89,7 +96,7 @@ class Resnet50(nn.Module):
     def __init__(self, base_encoder, num_classes = 265):
         super(Resnet50, self).__init__()
 
-        self.model_ft = base_encoder()  # torchvision.models.__dict__['resnet50']
+        self.model_ft = base_encoder(pretrained=True)  # torchvision.models.__dict__['resnet50']
 
         # same architecture as moco
         in_features = self.model_ft.fc.weight.size(1)
@@ -97,6 +104,7 @@ class Resnet50(nn.Module):
                                          nn.ReLU(),
                                          nn.Linear(in_features=in_features, out_features=num_classes)
                                          )
+        self.model_ft.apply(weights_init_classifier)
 
     def forward(self, img):
         """
@@ -110,6 +118,7 @@ class LinearProtocol(nn.Module):
     def __init__(self, input_dim = 2048, class_num=265,):  # 512
         super(LinearProtocol, self).__init__()
         self.fc = nn.Linear(in_features= input_dim, out_features= class_num)
+        self.fc.apply(weights_init_classifier)
     def forward(self, x) :
         return self.fc(x)
 
@@ -135,7 +144,8 @@ class ClassifierBlock(nn.Module):
         # classifier.apply(weights_init_classifier)
         self.add_block = add_block
         self.classifier = classifier
-
+        self.add_block.apply(weights_init_classifier)
+        self.classifier.apply(weights_init_classifier)
     def forward(self, x):
         x = self.add_block(x)
         x = self.classifier(x)
@@ -143,7 +153,7 @@ class ClassifierBlock(nn.Module):
 
 # for experiment1 & building the whole model
 class MoCoClassifier(nn.Module):
-    def __init__(self, moco_model, classifier, use_bn = False):
+    def __init__(self, moco_model, classifier, use_bn = False, pretrained = True, init= True):
         """
         @param moco_model : moco_model.q_enc + moco_model.k_enc
         @param classifier : Classifier block for real mix model or Linear for linear protocol
@@ -153,6 +163,10 @@ class MoCoClassifier(nn.Module):
         self.classifier = classifier
         if use_bn :
             self.BN = nn.BatchNorm1d()
+        if not pretrained :
+            self.moco_model.apply(weights_init_classifier)
+        if init :
+            self.classifier.apply(weights_init_classifier)
 
 
     def forward(self, img):
@@ -165,15 +179,21 @@ class MoCoClassifier(nn.Module):
         x = self.classifier(x)
         return x
 
+
 class ResnetClassifier(nn.Module):
-    def __init__(self, resnet, classifier):
+    def __init__(self, resnet, classifier, pretrained = False, init= True):
         """
         @param resnet : resnet50
         @param classifier : Classifier block for real mix model or Linear for linear protocol
         """
         super(ResnetClassifier, self).__init__()
         self.resnet = resnet.model_ft
+        if not pretrained :
+            self.resnet.apply(weights_init_classifier)
         self.classifier = classifier
+        if init :
+            self.classifier.apply(weights_init_classifier)
+
 
     def forward(self, img):
         x = img
@@ -181,8 +201,9 @@ class ResnetClassifier(nn.Module):
             x = layer(x)
             if layer_name == "avgpool":
                 break
-        x = F.relu(x.view(x.size(0), -1))
-        x = self.classifier(x)
-        return x
+
+        preds = F.relu(x.view(x.size(0), -1))
+        preds = self.classifier(preds)
+        return x, preds
 
 
