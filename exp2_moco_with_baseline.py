@@ -25,15 +25,17 @@ from torchvision import datasets, models, transforms
 import tensorflow as tf
 import torch.nn.functional as F
 
-from ImageDataLoader import SimpleImageLoader
-from models import Res18, Res50, Dense121, Res18_basic
+from baseline.ImageDataLoader import SimpleImageLoader
+# from models import Res18, Res50, Dense121, Res18_basic
 
-from pytorch_metric_learning import miners
-from pytorch_metric_learning import losses as lossfunc
+# from pytorch_metric_learning import miners
+# from pytorch_metric_learning import losses as lossfunc
 import glob
 
 import nsml
 from nsml import DATASET_PATH, IS_ON_NSML
+
+from moco_models import MoCoV2, MoCoClassifier, LinearProtocol
 
 NUM_CLASSES = 265
 if not IS_ON_NSML:
@@ -148,7 +150,7 @@ def _infer(model, root_path, test_loader=None):
     for idx, image in enumerate(test_loader):
         if torch.cuda.is_available():
             image = image.cuda()
-        _, probs = model(image)
+        probs = model(image)
         output = torch.argmax(probs, dim=1)
         output = output.detach().cpu().numpy()
         outputs.append(output)
@@ -182,9 +184,9 @@ parser.add_argument('--start_epoch', type=int, default=1, metavar='N', help='num
 parser.add_argument('--epochs', type=int, default=200, metavar='N', help='number of epochs to train (default: 200)')
 
 # basic settings
-parser.add_argument('--name',default='Res18baseMM', type=str, help='output model name')
+parser.add_argument('--name',default='moco_with_mixup', type=str, help='output model name')
 parser.add_argument('--gpu_ids',default='0', type=str,help='gpu_ids: e.g. 0  0,1,2  0,2')
-parser.add_argument('--batchsize', default=200, type=int, help='batchsize')
+parser.add_argument('--batchsize', default=64, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
@@ -229,12 +231,30 @@ def main():
         print("Currently using GPU {}".format(opts.gpu_ids))
         cudnn.benchmark = True
         torch.cuda.manual_seed_all(seed)
+        device = torch.device('cuda')
     else:
+        device = torch.device('cpu')
         print("Currently using CPU (GPU is highly recommended)")
 
+    print("Using {d}".format(d=device))
 
     # Set model
-    model = Res18_basic(NUM_CLASSES)
+    moco = MoCoV2(base_encoder=models.__dict__["resnet50"],q_size=128*280)
+
+    moco.to(device)
+    print("moco loaded and saved")
+
+    ### DO NOT MODIFY THIS BLOCK ###
+    if IS_ON_NSML:
+        bind_nsml(moco)
+        if opts.pause:
+            nsml.paused(scope=locals())
+    ######### pretrained moco #######################
+    moco.train()
+    nsml.load(checkpoint = 'MoCoV2_best', session = 'kaist_11/fashion_eval/7')
+
+    # model = Res18_basic(NUM_CLASSES)
+    model = MoCoClassifier(moco, LinearProtocol())
     model.eval()
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -371,8 +391,8 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         
         with torch.no_grad():
             # compute guessed labels of unlabel samples
-            embed_u1, pred_u1 = model(inputs_u1)
-            embed_u2, pred_u2 = model(inputs_u2)
+            pred_u1 = model(inputs_u1)
+            pred_u2 = model(inputs_u2)
             pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
             pt = pred_u_all**(1/opts.T)
             targets_u = pt / pt.sum(dim=1, keepdim=True)
@@ -397,10 +417,10 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
 
         optimizer.zero_grad()
         
-        fea, logits_temp = model(mixed_input[0])
+        logits_temp = model(mixed_input[0])
         logits = [logits_temp]
         for newinput in mixed_input[1:]:
-            fea, logits_temp = model(newinput)
+            logits_temp = model(newinput)
             logits.append(logits_temp)        
             
         # put interleaved samples back
@@ -422,7 +442,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         
         with torch.no_grad():
             # compute guessed labels of unlabel samples
-            embed_x, pred_x1 = model(inputs_x)
+            pred_x1 = model(inputs_x)
 
         acc_top1b = top_n_accuracy_score(targets_org.data.cpu().numpy(), pred_x1.data.cpu().numpy(), n=1)*100
         acc_top5b = top_n_accuracy_score(targets_org.data.cpu().numpy(), pred_x1.data.cpu().numpy(), n=5)*100    
@@ -460,7 +480,7 @@ def validation(opts, validation_loader, model, epoch, use_gpu):
                 inputs = inputs.cuda()
             inputs = Variable(inputs)
             nCnt +=1
-            embed_fea, preds = model(inputs)
+            preds = model(inputs)
 
             acc_top1 = top_n_accuracy_score(labels.numpy(), preds.data.cpu().numpy(), n=1)*100
             acc_top5 = top_n_accuracy_score(labels.numpy(), preds.data.cpu().numpy(), n=5)*100
