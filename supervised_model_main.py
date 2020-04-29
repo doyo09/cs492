@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from moco_dataloader import SupervisedImageLoader
 from moco_models import Resnet50
-from utils import AverageMeter, bind_nsml
+from utils import AverageMeter, bind_nsml, split_ids
 
 import argparse
 
@@ -44,33 +44,6 @@ parser.add_argument('--pause', type=int, default=0)
 parser.add_argument('--mode', type=str, default='train')
 ######################################################################
 
-
-def split_ids(path, ratio):
-    with open(path) as f:
-        ids_l = []
-        ids_u = []
-        cnt = 0
-        for i, line in enumerate(f.readlines()):
-            cnt += 1
-            if i == 0 or line == '' or line == '\n':
-                continue
-            line = line.replace('\n', '').split('\t')
-            if int(line[1]) >= 0:
-                ids_l.append(int(line[0]))
-            else:
-                ids_u.append(int(line[0]))
-    print("length of the file", cnt)
-    ids_l = np.array(ids_l)
-    ids_u = np.array(ids_u)
-
-    perm = np.random.permutation(np.arange(len(ids_l)))
-    cut = int(ratio * len(ids_l))
-    train_ids = ids_l[perm][cut:]
-    val_ids = ids_l[perm][:cut]
-
-    return train_ids, val_ids, ids_u
-
-
 def main():
     print("torch version : ", torch.__version__)
     global opts
@@ -79,7 +52,7 @@ def main():
     train_ids, val_ids, unl_ids = split_ids(os.path.join(DATASET_PATH, 'train/train_label'), 0.2)
     print('found {} train, {} validation and {} unlabeled images'.format(len(train_ids), len(val_ids), len(unl_ids)))
 
-    res_trainloader = SupervisedImageLoader(DATASET_PATH, 'train', train_ids,
+    res_trainloader = SupervisedImageLoader(DATASET_PATH, 'train', np.union1d(train_ids, val_ids),
                                        # simCLR style transform
                                        transform=transforms.Compose([
                                            transforms.Resize(opts.imResize),

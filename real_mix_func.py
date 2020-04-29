@@ -1,35 +1,6 @@
 import torch
-# import numpy as np
+import numpy as np
 import matplotlib.pyplot as plt
-
-# TSA
-def get_tsa_threshold(curr_step, total_steps, start = 0, end = None,schedule = "log-schdule", class_num=265):
-    """
-    :param curr_step: 
-    :param total_steps: 
-    :param start: starting step 
-    :param end: 
-    :param schedule: log or linear or exp 
-    :param class_num: 265
-    :return: threshold 
-    """
-    if end is None :
-        end = total_steps
-    # curr_step/total_steps
-    frac_t_T = torch.tensor(curr_step/total_steps, dtype = torch.float32)
-    if schedule.startswith("linear"):
-        alpha_t = frac_t_T
-    elif  schedule.startswith("exp"):
-        scale = 5
-        alpha_t = torch.exp((frac_t_T-1) * scale)
-    elif schedule.startswith("log"):
-        scale = 5
-        alpha_t = 1- torch.exp(-frac_t_T*scale)
-    else :
-        raise ValueError("no schedule")
-    threshold = alpha_t * (1 - 1/class_num) + 1/class_num
-
-    return threshold
 
 """
 활용법
@@ -79,9 +50,9 @@ OODmasking : tf
 
 
 
-if __name__ == "__main__":
-
-    steps = list(range(100))
-    thrh = [get_tsa_threshold(step, len(steps), ) for step in steps]
-    plt.plot(thrh)
-    plt.show()
+# if __name__ == "__main__":
+#
+#     steps = list(range(100))
+#     thrh = [get_tsa_threshold(step, len(steps), ) for step in steps]
+#     plt.plot(thrh)
+#     plt.show()

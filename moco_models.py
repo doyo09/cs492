@@ -12,14 +12,14 @@ def weights_init_classifier(m):
         nn.init.constant_(m.bias.data, 0.0)
 
 class MoCoV2(nn.Module):
-    def __init__(self, base_encoder, similarity_dim=128, q_size=128*64, momentum=0.999, temperature=0.07, ):
+    def __init__(self, base_encoder, similarity_dim=128, q_size=128*280, momentum=0.999, temperature=0.07, ):
         super(MoCoV2, self).__init__()
         self.K = q_size
         self.m = momentum
         self.T = temperature
 
-        self.q_enc = base_encoder()  # torchvision.models.__dict__['resnet50']
-        self.k_enc = base_encoder()  # torchvision.models.__dict__['resnet50']
+        self.q_enc = base_encoder(pretrained=True)  # torchvision.models.__dict__['resnet50']
+        self.k_enc = base_encoder(pretrained=True)  # torchvision.models.__dict__['resnet50']
 
         # for mlp
         in_features = self.q_enc.fc.weight.size(1)
@@ -161,8 +161,9 @@ class MoCoClassifier(nn.Module):
         super(MoCoClassifier, self).__init__()
         self.moco_model = moco_model.q_enc
         self.classifier = classifier
+        self.use_bn = use_bn
         if use_bn :
-            self.BN = nn.BatchNorm1d()
+            self.BN = nn.BatchNorm1d(num_features=2048)
         if not pretrained :
             self.moco_model.apply(weights_init_classifier)
         if init :
@@ -175,9 +176,12 @@ class MoCoClassifier(nn.Module):
             x = layer(x)
             if layer_name == "avgpool":
                 break
-        x = F.relu(x.view(x.size(0), -1))
-        x = self.classifier(x)
-        return x
+        if self.use_bn:
+            preds = F.relu(self.BN(x.view(x.size(0), -1)))
+        else :
+            preds = F.relu(x.view(x.size(0), -1))
+        preds = self.classifier(preds)
+        return x, preds
 
 
 class ResnetClassifier(nn.Module):

@@ -31,17 +31,19 @@ parser.add_argument('--batch_size', default=128, type=int, help='BS')
 
 parser.add_argument('--lr', default=.03, type=int, help='learning rate')
 parser.add_argument('--sgd_momentum', default=.9, type=int, help='sgd momentum')
-parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay',dest='weight_decay')
+parser.add_argument('--weight-decay', default=1e-4, type=float, help='weight decay', dest='weight_decay')
 
 parser.add_argument('--print_every', default=10, type=int, help='')
 
-parser.add_argument('--name',default='MoCoV2', type=str, help='output model name')
+parser.add_argument('--name', default='MoCoV2', type=str, help='output model name')
 parser.add_argument('--save_epoch', type=int, default=10, help='saving epoch interval')
 
 ### DO NOT MODIFY THIS BLOCK ###
 # arguments for nsml
 parser.add_argument('--pause', type=int, default=0)
 parser.add_argument('--mode', type=str, default='train')
+
+
 ######################################################################
 
 
@@ -78,50 +80,52 @@ def main():
 
     train_ids, val_ids, unl_ids = split_ids(os.path.join(DATASET_PATH, 'train/train_label'), 0.2)
     print('found {} train, {} validation and {} unlabeled images'.format(len(train_ids), len(val_ids), len(unl_ids)))
-    
-    moco_trainloader = MoCoImageLoader(DATASET_PATH, 'train', np.setdiff1d(unl_ids, val_ids),# unl_ids if you fully train moco
+
+    moco_trainloader = MoCoImageLoader(DATASET_PATH, 'train', np.setdiff1d(unl_ids, val_ids),
+                                       # unl_ids if you fully train moco
                                        # simCLR style transform
                                        transform=transforms.Compose([
                                            transforms.Resize(opts.imResize),
                                            transforms.RandomResizedCrop(opts.imsize),
                                            # transforms.RandomApply([
-                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),  # not strengthened
-                                                # ], p=0.8),
+                                           transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),  # not strengthened
+                                           # ], p=0.8),
                                            transforms.RandomGrayscale(p=0.2),
                                            # gaussian blur should be added
                                            transforms.RandomHorizontalFlip(),
                                            transforms.ToTensor(),
-                                           transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ]))
+                                           transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                                std=[0.229, 0.224, 0.225]), ]))
     print("len(moco_trainloader) :", len(moco_trainloader), )
     moco_trainloader = torch.utils.data.DataLoader(moco_trainloader, batch_size=opts.batch_size, shuffle=True,
-                                                   pin_memory=True, drop_last=True) # num_workers = 4
+                                                   pin_memory=True, drop_last=True)  # num_workers = 4
 
     moco_valloader = MoCoImageLoader(DATASET_PATH, 'val', val_ids,
                                      # simCLR style transform
                                      transform=transforms.Compose([
-                                           transforms.Resize(opts.imResize),
-                                           transforms.RandomResizedCrop(opts.imsize),
-                                           # transforms.RandomApply([
-                                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),  # not strengthened
-                                                # ], p=0.8),
-                                           transforms.RandomGrayscale(p=0.2),
-                                           # gaussian blur should be added
-                                           transforms.RandomHorizontalFlip(),
-                                           transforms.ToTensor(),
-                                           transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ]))
-
+                                         transforms.Resize(opts.imResize),
+                                         transforms.RandomResizedCrop(opts.imsize),
+                                         # transforms.RandomApply([
+                                         transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),  # not strengthened
+                                         # ], p=0.8),
+                                         transforms.RandomGrayscale(p=0.2),
+                                         # gaussian blur should be added
+                                         transforms.RandomHorizontalFlip(),
+                                         transforms.ToTensor(),
+                                         transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                              std=[0.229, 0.224, 0.225]), ]))
 
     print("len(moco_valloader) :", len(moco_valloader), )
     moco_valloader = torch.utils.data.DataLoader(moco_valloader, batch_size=opts.batch_size, shuffle=False,
-                                                   pin_memory=True, drop_last=False) 
+                                                 pin_memory=True, drop_last=False)
     print('train_loaders done')
 
     ###### set device, model ######
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    print("Using {d}".format(d = device))
+    print("Using {d}".format(d=device))
 
     ###### set model ######
-    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet50"], q_size=128*280)
+    moco_v2 = MoCoV2(base_encoder=models.__dict__["resnet18"], q_size=128 * 280)
     moco_v2.to(device)
     print("model set")
 
@@ -155,22 +159,22 @@ def main():
             output, labels = output.to(device), labels.to(device)
 
             loss = criterion(output, labels)
-            loss_hist.update(val = loss.item(), n = opts.batch_size)
+            loss_hist.update(val=loss.item(), n=opts.batch_size)
 
             optimizer.zero_grad()
             loss.backward()
-            if e == 0 : # and batch_idx < 64:
+            if e == 0:  # and batch_idx < 64:
                 print("not updating until queue is full")
-            else :
+            else:
                 optimizer.step()
             # print(loss.item())
 
-            if batch_idx % opts.print_every == opts.print_every  - 1 :
+            if batch_idx % opts.print_every == opts.print_every - 1:
                 # print(moco_v2.queue, moco_v2.queue_pointer)
-                print("Train Epoch:{}, [{}/{}] Loss:{:.4f}/[avg: {:.4f}]".format(e+1,\
-                                                                         batch_idx*opts.batch_size, \
-                                                                         len(moco_trainloader.dataset),\
-                                                                         loss_hist.val, loss_hist.avg))
+                print("Train Epoch:{}, [{}/{}] Loss:{:.4f}/[avg: {:.4f}]".format(e + 1, \
+                                                                                 batch_idx * opts.batch_size, \
+                                                                                 len(moco_trainloader.dataset), \
+                                                                                 loss_hist.val, loss_hist.avg))
             if i % opts.print_every == 0:
                 nsml.report(step=i, loss=loss_hist.val, loss_avg=loss_hist.avg)
             i += 1
@@ -191,10 +195,7 @@ def main():
 
         best_loss = min(loss_hist.val, best_loss)
 
+
 if __name__ == "__main__":
     main()
-
-
-
-
 

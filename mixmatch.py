@@ -21,10 +21,9 @@ import torch.nn.functional as F
 
 import torchvision.models as models
 from torchvision import datasets, transforms
-
 from moco_dataloader import MixMatchImageLoader
-from utils import AverageMeter, bind_nsml, split_ids, get_tsa_threshold
-from moco_models import Resnet50, ResnetClassifier, ClassifierBlock
+from utils import AverageMeter, split_ids, get_tsa_threshold
+from moco_models import MoCoV2, MoCoClassifier, Resnet50, ResnetClassifier, ClassifierBlock
 from baseline.models import Res18_basic, Res50
 
 # from pytorch_metric_learning import miners
@@ -100,6 +99,7 @@ def interleave(xy, batch):
         xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
     return [torch.cat(v, dim=0) for v in xy]
 
+
 class SemiLoss(object):
     def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, final_epoch,
                  step, total_steps, # tsa related params
@@ -109,7 +109,7 @@ class SemiLoss(object):
         if is_tsa :
             probs_sup = torch.softmax(outputs_x, dim=1) # (N,C)
             probs_sup = torch.sum(probs_sup * targets_x, dim = 1) #(N,C) -> (N,)
-            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps)
+            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps, schedule="log") #"exp", "linear"
             larger_than_threshold = probs_sup > tsa_threshold
             loss_mask = torch.ones(targets_x.size(0), dtype=torch.float32).cuda() * (1-larger_than_threshold.type(torch.float32)).cuda()
             Lx = -torch.sum(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1) * loss_mask)
@@ -144,6 +144,50 @@ class SemiLoss(object):
         return Lx, Lu, opts.lambda_u * linear_rampup(epoch, final_epoch)
 
 
+
+### NSML functions
+def _moco_infer(model, root_path, test_loader=None):
+    if test_loader is None:
+        test_loader = torch.utils.data.DataLoader(
+            SimpleImageLoader(root_path, 'test',
+                            transform=transforms.Compose([
+                                transforms.Resize(opts.imResize),
+                                transforms.CenterCrop(opts.imsize),
+                                transforms.ToTensor(),
+                                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
+            batch_size=opts.batchsize, shuffle=False, num_workers = 4,pin_memory=True, drop_last=False)
+        print('loaded {} validation images'.format(len(test_loader.dataset)))
+
+    outputs = []
+    # s_t = time.time()
+    for idx, image in enumerate(test_loader):
+        if torch.cuda.is_available():
+            image = image.cuda()
+        _, probs = model(image)
+        output = torch.argmax(probs, dim=1)
+        output = output.detach().cpu().numpy()
+        outputs.append(output)
+
+    outputs = np.concatenate(outputs)
+    return outputs
+
+def bind_nsml(model):
+    def save(dir_name, *args, **kwargs):
+        os.makedirs(dir_name, exist_ok=True)
+        state = model.state_dict()
+        torch.save(state, os.path.join(dir_name, 'model.pt'))
+        print('saved')
+
+    def load(dir_name, *args, **kwargs):
+        state = torch.load(os.path.join(dir_name, 'model.pt'))
+        model.load_state_dict(state)
+        print('loaded')
+
+    def infer(root_path):
+        return _moco_infer(model, root_path)
+
+    nsml.bind(save=save, load=load, infer=infer)
+
 ######################################################################
 # Options
 ######################################################################
@@ -154,7 +198,7 @@ parser.add_argument('--epochs', type=int, default=200, metavar='N', help='number
 # basic settings
 parser.add_argument('--name', default='Res18baseMM', type=str, help='output model name')
 parser.add_argument('--gpu_ids', default='0', type=str, help='gpu_ids: e.g. 0  0,1,2  0,2')
-parser.add_argument('--batchsize', default=64, type=int, help='batchsize')
+parser.add_argument('--batchsize', default=200, type=int, help='batchsize')
 parser.add_argument('--seed', type=int, default=123, help='random seed')
 
 # basic hyper-parameters
@@ -179,6 +223,12 @@ parser.add_argument('--pause', type=int, default=0)
 parser.add_argument('--mode', type=str, default='train')
 
 
+parser.add_argument('--use_sup_pretrained', action='store_true', help = 'use supervisely pretrained')
+parser.add_argument('--use_moco', action='store_true', help = 'use moco')
+
+parser.add_argument('--finetuning', action='store_true', help = 'use finetuning with freezing the rest layers')
+parser.add_argument('--release', action='store_true', help = 'unfreeze more layers to update')
+
 ################################
 
 def main():
@@ -197,16 +247,62 @@ def main():
     if use_gpu:
         opts.cuda = 1
         print("Currently using GPU {}".format(opts.gpu_ids))
+        device = torch.device('cuda')
         cudnn.benchmark = True
         torch.cuda.manual_seed_all(seed)
     else:
         print("Currently using CPU (GPU is highly recommended)")
 
     # Set model
-    # model = Res18_basic(NUM_CLASSES)
-    # model = Res50(NUM_CLASSES)
-    resnet = Resnet50(base_encoder=models.__dict__["resnet50"])
-    model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=False, init=True)
+    if opts.use_sup_pretrained :
+        resnet = Resnet50(base_encoder=models.__dict__["resnet50"], )
+        resnet.to(device)
+        print("resnet loaded and saved")
+        ### DO NOT MODIFY THIS BLOCK ###
+        if IS_ON_NSML:
+            bind_nsml(resnet)
+            if opts.pause:
+                nsml.paused(scope=locals())
+        ######### pretrained resnet load ######################
+        resnet.train()
+        nsml.load(checkpoint='Resnet_best', session='kaist_11/fashion_eval/19')
+        # nsml.load(checkpoint='resnet_linear_e89', session='kaist_11/fashion_eval/31') # pretrained Classifier
+        nsml.save('saved')
+        if opts.finetuning:
+            for param in resnet.parameters():
+                param.requires_grad = False
+                # print([param.size for param in resnet.parameters() if param.requires_grad])
+            assert len([param.size for param in resnet.parameters() if param.requires_grad]) == 0
+
+        model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=True, init=True)
+        del resnet
+    elif opts.use_moco :
+        moco = MoCoV2(base_encoder=models.__dict__["resnet50"],)
+        moco.to(device)
+        print("moco-pretrained loaded and saved")
+        ### DO NOT MODIFY THIS BLOCK ###
+        if IS_ON_NSML:
+            bind_nsml(moco)
+            if opts.pause:
+                nsml.paused(scope=locals())
+        ######### pretrained moco load #######################
+        moco.train()
+        nsml.load(checkpoint='MoCoV2_best', session='kaist_11/fashion_eval/7')
+        nsml.save('saved')
+        if opts.finetuning:
+            for param in moco.parameters():
+                param.requires_grad = False
+            assert len([param.size for param in moco.parameters() if param.requires_grad]) == 0
+
+        model = MoCoClassifier(moco, ClassifierBlock(), use_bn=True, pretrained=True, init=True)
+        del moco
+    else :
+        model = Res18_basic(NUM_CLASSES)
+
+        # model = Res50(NUM_CLASSES)
+        # resnet = Resnet50(base_encoder=models.__dict__["resnet50"])
+        # model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=False, init=True)
+
     model.eval()
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -222,6 +318,10 @@ def main():
         if opts.pause:
             nsml.paused(scope=locals())
     ################################
+
+    ########### when you train pretrained model ###########
+    # nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/118')
+    # nsml.save('saved')
 
     if opts.mode == 'train':
         model.train()
@@ -275,16 +375,35 @@ def main():
         # Train and Validation
         train_i = 0 # for nsml.report
         val_i = 0
+        global train_i
+        global val_i
 
         best_acc = -1
 
+        if opts.finetuning and opts.release:
+            release_schedule = np.linspace(opts.start_epoch, opts.epochs, 10)[1:]
         for epoch in range(opts.start_epoch, opts.epochs + 1):
+            ## release layers to update
+            if opts.finetuning and opts.release:
+                if list(release_schedule) :
+                    if epoch > release_schedule[0]:
+                        cnt = 0
+                        for param in reversed(list(res_clr.parameters())):
+                            if not param.requires_grad:
+                                param.requires_grad = True
+                                cnt += 1
+                                if cnt == 6: break
+                            else:
+                                continue
+                        del cnt
+                        release_schedule = release_schedule[1:]
+
             print('start training')
-            loss, train_acc_top1, train_acc_top5 = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu, train_i)
+            loss, train_acc_top1, train_acc_top5, train_i  = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu, train_i)
             scheduler.step()
 
             print('start validation')
-            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu, val_i)
+            acc_top1, acc_top5, val_i = validation(opts, validation_loader, model, epoch, use_gpu, val_i)
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
 
@@ -433,7 +552,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
     avg_top1 = float(avg_top1 / nCnt)
     avg_top5 = float(avg_top5 / nCnt)
 
-    return avg_loss, avg_top1, avg_top5
+    return avg_loss, avg_top1, avg_top5, train_i
 
 
 def validation(opts, validation_loader, model, epoch, use_gpu, val_i):
@@ -462,7 +581,7 @@ def validation(opts, validation_loader, model, epoch, use_gpu, val_i):
         nsml.report(step=val_i, val_acc_top1=acc_top1, val_acc_top5=acc_top5, )
         val_i += 1
 
-    return avg_top1, avg_top5
+    return avg_top1, avg_top5, val_i
 
 
 if __name__ == '__main__':

@@ -28,8 +28,8 @@ import torch.nn.functional as F
 from ImageDataLoader import SimpleImageLoader
 from models import Res18, Res50, Dense121, Res18_basic
 
-from pytorch_metric_learning import miners
-from pytorch_metric_learning import losses as lossfunc
+# from pytorch_metric_learning import miners
+# from pytorch_metric_learning import losses as lossfunc
 import glob
 
 import nsml
@@ -297,15 +297,20 @@ def main():
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,  milestones=[50, 150], gamma=0.1)
 
-        # Train and Validation 
+        # Train and Validation
+        train_i = 0  # for nsml.report
+        val_i = 0
+        global train_i
+        global val_i
+
         best_acc = -1
         for epoch in range(opts.start_epoch, opts.epochs + 1):
             print('start training')
-            loss, _, _ = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu)
+            loss, train_acc_top1, train_acc_top5, train_i = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu, train_i)
             scheduler.step()
 
             print('start validation')
-            acc_top1, acc_top5 = validation(opts, validation_loader, model, epoch, use_gpu)
+            acc_top1, acc_top5, val_i = validation(opts, validation_loader, model, epoch, use_gpu, val_i)
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
             if is_best:
@@ -321,7 +326,7 @@ def main():
                     torch.save(model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
 
                 
-def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu):
+def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu, train_i):
     losses = AverageMeter()
     losses_x = AverageMeter()
     losses_un = AverageMeter()
@@ -434,16 +439,20 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
             print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) '.format( 
                 epoch, batch_idx *inputs_x.size(0), len(train_loader.dataset), losses.val, losses.avg, acc_top1.val, acc_top1.avg, acc_top5.val, acc_top5.avg))
         
-        nCnt += 1 
+        nCnt += 1
+
+        ###### nsml report ######
+        nsml.report(step=train_i, train_loss=loss.item(), train_acc_top1=acc_top1b, train_acc_top5=acc_top5b, )
+        train_i += 1
         
     avg_loss =  float(avg_loss/nCnt)
     avg_top1 = float(avg_top1/nCnt)
     avg_top5 = float(avg_top5/nCnt)
     
-    return  avg_loss, avg_top1, avg_top5    
+    return  avg_loss, avg_top1, avg_top5, train_i
 
 
-def validation(opts, validation_loader, model, epoch, use_gpu):
+def validation(opts, validation_loader, model, epoch, use_gpu, val_i):
     model.eval()
     avg_top1= 0.0
     avg_top5 = 0.0
@@ -465,7 +474,12 @@ def validation(opts, validation_loader, model, epoch, use_gpu):
         avg_top1 = float(avg_top1/nCnt)   
         avg_top5= float(avg_top5/nCnt)   
         print('Test Epoch:{} Top1_acc_val:{:.2f}% Top5_acc_val:{:.2f}% '.format(epoch, avg_top1, avg_top5))
-    return avg_top1, avg_top5
+
+        ###### nsml report ######
+        nsml.report(step=val_i, val_acc_top1=acc_top1, val_acc_top5=acc_top5, )
+        val_i += 1
+
+    return avg_top1, avg_top5, val_i
 
 
 
