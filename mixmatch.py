@@ -266,8 +266,6 @@ def main():
         ### DO NOT MODIFY THIS BLOCK ###
         if IS_ON_NSML:
             bind_nsml(resnet)
-            if opts.pause:
-                nsml.paused(scope=locals())
         ######### pretrained resnet load ######################
         resnet.train()
         nsml.load(checkpoint='Resnet_best', session='kaist_11/fashion_eval/19')
@@ -288,8 +286,6 @@ def main():
         ### DO NOT MODIFY THIS BLOCK ###
         if IS_ON_NSML:
             bind_nsml(moco)
-            if opts.pause:
-                nsml.paused(scope=locals())
         ######### pretrained moco load #######################
         moco.train()
         nsml.load(checkpoint='MoCoV2_best', session='kaist_11/fashion_eval/7')
@@ -338,6 +334,8 @@ def main():
     ########### when you train pretrained model ###########
     # nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/118')
     # nsml.save('saved')
+    if IS_ON_NSML and opts.pause:
+        nsml.paused(scope=locals())
 
     if opts.mode == 'train':
         model.train()
