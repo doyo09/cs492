@@ -147,6 +147,7 @@ class SemiLoss(object):
 
 ### NSML functions
 def _moco_infer(model, root_path, test_loader=None):
+    opts = parser.parse_args()
     if test_loader is None:
         test_loader = torch.utils.data.DataLoader(
             MixMatchImageLoader(root_path, 'test',
