@@ -109,7 +109,7 @@ class SemiLoss(object):
         if is_tsa :
             probs_sup = torch.softmax(outputs_x, dim=1) # (N,C)
             probs_sup = torch.sum(probs_sup * targets_x, dim = 1) #(N,C) -> (N,)
-            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps, schedule="log") #"exp", "linear"
+            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps, schedule="exp") #"log", "linear"
             larger_than_threshold = probs_sup > tsa_threshold
             loss_mask = torch.ones(targets_x.size(0), dtype=torch.float32).cuda() * (1-larger_than_threshold.type(torch.float32)).cuda()
             Lx = -torch.sum(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1) * loss_mask)
@@ -149,7 +149,7 @@ class SemiLoss(object):
 def _moco_infer(model, root_path, test_loader=None):
     if test_loader is None:
         test_loader = torch.utils.data.DataLoader(
-            SimpleImageLoader(root_path, 'test',
+            MixMatchImageLoader(root_path, 'test',
                             transform=transforms.Compose([
                                 transforms.Resize(opts.imResize),
                                 transforms.CenterCrop(opts.imsize),
@@ -226,8 +226,13 @@ parser.add_argument('--mode', type=str, default='train')
 parser.add_argument('--use_sup_pretrained', action='store_true', help = 'use supervisely pretrained')
 parser.add_argument('--use_moco', action='store_true', help = 'use moco')
 
-parser.add_argument('--finetuning', action='store_true', help = 'use finetuning with freezing the rest layers')
 parser.add_argument('--release', action='store_true', help = 'unfreeze more layers to update')
+parser.add_argument('--finetuning', action='store_true', help = 'use finetuning with freezing the rest layers')
+parser.add_argument('--retrain', action='store_true', help = 'retrain')
+
+parser.add_argument('--use_tsa', action='store_true', help = 'tsa')
+parser.add_argument('--use_ood', action='store_true', help = 'ood')
+
 
 ################################
 
@@ -303,6 +308,7 @@ def main():
         # resnet = Resnet50(base_encoder=models.__dict__["resnet50"])
         # model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=False, init=True)
 
+
     model.eval()
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
@@ -318,6 +324,16 @@ def main():
         if opts.pause:
             nsml.paused(scope=locals())
     ################################
+
+    if opts.retrain: # start training in the middle
+        # for sup-pretrained
+        if opts.use_sup_pretrained :
+            nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/150') #150+Res18baseMM_best : trained for 200 epochs; 154+Res18baseMM_e49: +release_layers
+            nsml.save('Res18baseMM_e200')
+        # for moco-pretrained
+        elif opts.use_moco :
+            nsml.load(checkpoint='Res18baseMM_e49', session='kaist_11/fashion_eval/154')
+            nsml.save('Res18baseMM_e49')
 
     ########### when you train pretrained model ###########
     # nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/118')
@@ -381,14 +397,15 @@ def main():
         best_acc = -1
 
         if opts.finetuning and opts.release:
-            release_schedule = np.linspace(opts.start_epoch, opts.epochs, 10)[1:]
+            release_schedule = np.linspace(1, opts.epochs, 5)[1:]
+
         for epoch in range(opts.start_epoch, opts.epochs + 1):
             ## release layers to update
             if opts.finetuning and opts.release:
                 if list(release_schedule) :
                     if epoch > release_schedule[0]:
                         cnt = 0
-                        for param in reversed(list(res_clr.parameters())):
+                        for param in reversed(list(model.parameters())):
                             if not param.requires_grad:
                                 param.requires_grad = True
                                 cnt += 1
@@ -510,8 +527,8 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
                                                    step= int((epoch + batch_idx / len(train_loader)) * (len(train_loader.dataset)/batch_size)),
                                                    total_steps= int(opts.epochs *(len(train_loader.dataset)/batch_size)),
                                                    ood_mask_pct=.3, # ood related params : need to tune between .3 and .6
-                                                   is_tsa = True,
-                                                   is_ood=True
+                                                   is_tsa = opts.use_tsa,
+                                                   is_ood=opts.use_ood
                                                    )
         loss = loss_x + weigts_mixing * loss_un
 
@@ -578,7 +595,7 @@ def validation(opts, validation_loader, model, epoch, use_gpu, val_i):
         avg_top5 = float(avg_top5 / nCnt)
         print('Test Epoch:{} Top1_acc_val:{:.2f}% Top5_acc_val:{:.2f}% '.format(epoch, avg_top1, avg_top5))
         ###### nsml report ######
-        nsml.report(step=val_i, val_acc_top1=acc_top1, val_acc_top5=acc_top5, )
+        nsml.report(step=val_i, val_acc_top1=avg_top1, val_acc_top5=avg_top5, )
         val_i += 1
 
     return avg_top1, avg_top5, val_i
