@@ -12,7 +12,7 @@ def weights_init_classifier(m):
         nn.init.constant_(m.bias.data, 0.0)
 
 class MoCoV2(nn.Module):
-    def __init__(self, base_encoder, similarity_dim=128, q_size=128*280, momentum=0.999, temperature=0.07, ):
+    def __init__(self, base_encoder, similarity_dim=128, q_size=200*179, momentum=0.999, temperature=0.07, ):
         super(MoCoV2, self).__init__()
         self.K = q_size
         self.m = momentum

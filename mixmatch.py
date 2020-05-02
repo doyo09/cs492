@@ -25,6 +25,7 @@ from moco_dataloader import MixMatchImageLoader
 from utils import AverageMeter, split_ids, get_tsa_threshold
 from moco_models import MoCoV2, MoCoClassifier, Resnet50, ResnetClassifier, ClassifierBlock
 from baseline.models import Res18_basic, Res50
+from rand_aug.rand_augmentation import RandAugment
 
 # from pytorch_metric_learning import miners
 # from pytorch_metric_learning import losses as lossfunc
@@ -109,7 +110,7 @@ class SemiLoss(object):
         if is_tsa :
             probs_sup = torch.softmax(outputs_x, dim=1) # (N,C)
             probs_sup = torch.sum(probs_sup * targets_x, dim = 1) #(N,C) -> (N,)
-            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps, schedule="exp") #"log", "linear"
+            tsa_threshold = get_tsa_threshold(curr_step=step, total_steps=total_steps, schedule="linear") #"exp", "log"
             larger_than_threshold = probs_sup > tsa_threshold
             loss_mask = torch.ones(targets_x.size(0), dtype=torch.float32).cuda() * (1-larger_than_threshold.type(torch.float32)).cuda()
             Lx = -torch.sum(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1) * loss_mask)
@@ -210,7 +211,7 @@ parser.add_argument('--lossXent', type=float, default=1, help='lossWeight for Xe
 
 # arguments for logging and backup
 parser.add_argument('--log_interval', type=int, default=10, metavar='N', help='logging training status')
-parser.add_argument('--save_epoch', type=int, default=50, help='saving epoch interval')
+parser.add_argument('--save_epoch', type=int, default=30, help='saving epoch interval')
 
 # hyper-parameters for mix-match
 parser.add_argument('--alpha', default=0.75, type=float)
@@ -232,6 +233,10 @@ parser.add_argument('--retrain', action='store_true', help = 'retrain')
 
 parser.add_argument('--use_tsa', action='store_true', help = 'tsa')
 parser.add_argument('--use_ood', action='store_true', help = 'ood')
+
+parser.add_argument('--use_randaug', action='store_true', help = 'rand augmentation')
+parser.add_argument('--N', type=int,default=1, help = 'num of augmentations')
+parser.add_argument('--M', type=int, default=2, help = 'magnitude')
 
 
 ################################
@@ -301,12 +306,12 @@ def main():
 
         model = MoCoClassifier(moco, ClassifierBlock(), use_bn=True, pretrained=True, init=True)
         del moco
-    else :
+    else : # baseline
         model = Res18_basic(NUM_CLASSES)
 
         # model = Res50(NUM_CLASSES)
-        # resnet = Resnet50(base_encoder=models.__dict__["resnet50"])
-        # model = ResnetClassifier(resnet, ClassifierBlock(), pretrained=False, init=True)
+
+
 
 
     model.eval()
@@ -334,6 +339,9 @@ def main():
         elif opts.use_moco :
             nsml.load(checkpoint='Res18baseMM_e49', session='kaist_11/fashion_eval/154')
             nsml.save('Res18baseMM_e49')
+        else :
+            nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/145')
+            nsml.save('baseline_best')
 
     ########### when you train pretrained model ###########
     # nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/118')
@@ -348,10 +356,12 @@ def main():
         train_loader = torch.utils.data.DataLoader(
             MixMatchImageLoader(DATASET_PATH, 'train', train_ids,
                               transform=transforms.Compose([
-                                  transforms.Resize(opts.imResize),
-                                  transforms.RandomResizedCrop(opts.imsize),
+                                  RandAugment(opts.N, opts.M) if opts.use_randaug else lambda x: x,
+                                  transforms.Resize([opts.imsize, opts.imsize]), #opts.imResize
+                                  # transforms.RandomResizedCrop(opts.imsize),
                                   transforms.RandomHorizontalFlip(),
                                   transforms.RandomVerticalFlip(),
+                                  transforms.ColorJitter(brightness= 0.4,contrast=0.4,saturation=0.4, hue= 0.4),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
             batch_size=opts.batchsize, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
@@ -360,10 +370,12 @@ def main():
         unlabel_loader = torch.utils.data.DataLoader(
             MixMatchImageLoader(DATASET_PATH, 'unlabel', unl_ids,
                               transform=transforms.Compose([
-                                  transforms.Resize(opts.imResize),
-                                  transforms.RandomResizedCrop(opts.imsize),
+                                  RandAugment(opts.N, opts.M) if opts.use_randaug else lambda x: x,
+                                  transforms.Resize([opts.imsize, opts.imsize]), #opts.imResize
+                                  # transforms.RandomResizedCrop(opts.imsize),
                                   transforms.RandomHorizontalFlip(),
                                   transforms.RandomVerticalFlip(),
+                                  transforms.ColorJitter(brightness= 0.4,contrast=0.4,saturation=0.4, hue= 0.4),
                                   transforms.ToTensor(),
                                   transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
             batch_size=opts.batchsize, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
@@ -386,7 +398,7 @@ def main():
         train_criterion = SemiLoss()
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 150], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 80, 120, 150, 180], gamma=0.1, )
 
         # Train and Validation
         train_i = 0 # for nsml.report
@@ -516,7 +528,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
             fea, logits_temp = model(newinput)
             logits.append(logits_temp)
 
-            # put interleaved samples back
+        # put interleaved samples back
         logits = interleave(logits, batch_size)
         logits_x = logits[0]
         logits_u = torch.cat(logits[1:], dim=0)

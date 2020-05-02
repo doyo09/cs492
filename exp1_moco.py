@@ -97,7 +97,7 @@ def main():
                                                                      std=[0.229, 0.224, 0.225]), ]))
     print("len(moco_trainloader) :", len(moco_trainloader), )
     moco_trainloader = torch.utils.data.DataLoader(moco_trainloader, batch_size=opts.batch_size, shuffle=True,
-                                                  pin_memory=True, drop_last=True)  # num_workers = 4
+                                                  num_workers = 4, pin_memory=True, drop_last=True)  # num_workers = 4
 
     moco_valloader = MoCoImageLoader(DATASET_PATH, 'val', val_ids,
                                      # simCLR style transform
@@ -116,7 +116,7 @@ def main():
 
     print("len(moco_valloader) :", len(moco_valloader), )
     moco_valloader = torch.utils.data.DataLoader(moco_valloader, batch_size=opts.batch_size, shuffle=False,
-                                                   pin_memory=True, drop_last=False) # num_workers = 4
+                                                   num_workers = 4, pin_memory=True, drop_last=False) # num_workers = 4
 
     print('train_loaders done')
 
@@ -125,7 +125,7 @@ def main():
     print("Using {d}".format(d=device))
 
     ###### set model ######
-    moco = MoCoV2(base_encoder=models.__dict__["resnet50"],q_size=128*280)
+    moco = MoCoV2(base_encoder=models.__dict__["resnet18"],)
 
     moco.to(device)
     print("moco loaded and saved")
