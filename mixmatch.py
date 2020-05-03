@@ -10,6 +10,7 @@ import numpy as np
 import shutil
 import random
 import time
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -144,6 +145,48 @@ class SemiLoss(object):
 
         return Lx, Lu, opts.lambda_u * linear_rampup(epoch, final_epoch)
 
+class ModelEMA(object):
+    def __init__(self, args, model, decay, device='', resume=''):
+        self.ema = deepcopy(model)
+        self.ema.eval()
+        self.decay = decay
+        self.device = device
+        self.wd = args.lr * 5e-4
+        if device:
+            self.ema.to(device=device)
+        self.ema_has_module = hasattr(self.ema, 'module')
+        if resume:
+            self._load_checkpoint(resume)
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    def _load_checkpoint(self, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        assert isinstance(checkpoint, dict)
+        if 'ema_state_dict' in checkpoint:
+            new_state_dict = OrderedDict()
+            for k, v in checkpoint['ema_state_dict'].items():
+                if self.ema_has_module:
+                    name = 'module.' + k if not k.startswith('module') else k
+                else:
+                    name = k
+                new_state_dict[name] = v
+            self.ema.load_state_dict(new_state_dict)
+
+    def update(self, model):
+        needs_module = hasattr(model, 'module') and not self.ema_has_module
+        with torch.no_grad():
+            msd = model.state_dict()
+            for k, ema_v in self.ema.state_dict().items():
+                if needs_module:
+                    k = 'module.' + k
+                model_v = msd[k].detach()
+                if self.device:
+                    model_v = model_v.to(device=self.device)
+                ema_v.copy_(ema_v * self.decay + (1. - self.decay) * model_v)
+                # weight decay
+                if 'bn' not in k:
+                    msd[k] = msd[k] * (1. - self.wd)
 
 
 ### NSML functions
@@ -239,6 +282,9 @@ parser.add_argument('--use_randaug', action='store_true', help = 'rand augmentat
 parser.add_argument('--N', type=int,default=1, help = 'num of augmentations')
 parser.add_argument('--M', type=int, default=2, help = 'magnitude')
 
+# fixmatch
+parser.add_argument('--use_ema', action='store_true', default=False, help='use EMA model')
+parser.add_argument('--ema-decay', default=0.999, type=float, help='EMA decay rate')
 
 ################################
 
@@ -398,6 +444,8 @@ def main():
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 80, 120, 150, 180], gamma=0.1, )
+        if opts.use_ema:
+            ema_model = ModelEMA(opts, model, opts.ema_decay, device)
 
         # Train and Validation
         train_i = 0 # for nsml.report
@@ -427,11 +475,14 @@ def main():
                         release_schedule = release_schedule[1:]
 
             print('start training')
-            loss, train_acc_top1, train_acc_top5, train_i  = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu, train_i)
+            loss, train_acc_top1, train_acc_top5, train_i  = train(opts, train_loader, unlabel_loader, model, train_criterion, optimizer, epoch, use_gpu, train_i, ema_model)
             scheduler.step()
 
             print('start validation')
-            acc_top1, acc_top5, val_i = validation(opts, validation_loader, model, epoch, use_gpu, val_i)
+            if opts.use_ema:
+                acc_top1, acc_top5, val_i = validation(opts, validation_loader, ema_model.ema, epoch, use_gpu, val_i)
+            else:
+                acc_top1, acc_top5, val_i = validation(opts, validation_loader, model, epoch, use_gpu, val_i)
             is_best = acc_top1 > best_acc
             best_acc = max(acc_top1, best_acc)
 
@@ -448,7 +499,7 @@ def main():
                     torch.save(model.state_dict(), os.path.join('runs', opts.name + '_e{}'.format(epoch)))
 
 
-def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu, train_i):
+def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch, use_gpu, train_i, ema_model):
     losses = AverageMeter()
     losses_x = AverageMeter()
     losses_un = AverageMeter()
@@ -551,6 +602,8 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         # compute gradient and do SGD step
         loss.backward()
         optimizer.step()
+        if opts.use_ema:
+            ema_model.update(model)
 
         with torch.no_grad():
             # compute guessed labels of unlabel samples
