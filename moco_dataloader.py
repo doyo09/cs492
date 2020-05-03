@@ -12,10 +12,14 @@ def default_image_loader(path):
     return Image.open(path).convert('RGB')
 
 class TransformTwice:
-    def __init__(self, transform):
+    def __init__(self, transform, weak_transform):
         self.transform = transform
+        self.weak_transform = weak_transform
     def __call__(self, inp):
-        img_q = self.transform(inp)
+        if self.weak_transform != None:
+            img_q = self.weak_transform(inp)
+        else:
+            img_q = self.transform(inp)
         img_k = self.transform(inp)
         return img_q, img_k    
     
@@ -140,7 +144,7 @@ class SupervisedImageLoader(torch.utils.data.Dataset):
 
 
 class MixMatchImageLoader(torch.utils.data.Dataset):
-    def __init__(self, rootdir, split, ids=None, transform=None, loader=default_image_loader):
+    def __init__(self, rootdir, split, ids=None, transform=None, weak_transform=None, loader=default_image_loader):
         if split == 'test':
             self.impath = os.path.join(rootdir, 'test_data')
             meta_file = os.path.join(self.impath, 'test_meta.txt')
@@ -167,7 +171,7 @@ class MixMatchImageLoader(torch.utils.data.Dataset):
                             imclasses.append(int(label))
 
         self.transform = transform
-        self.TransformTwice = TransformTwice(transform)
+        self.TransformTwice = TransformTwice(transform, weak_transform)
         self.loader = loader
         self.split = split
         self.imnames = imnames

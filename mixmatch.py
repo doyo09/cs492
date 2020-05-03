@@ -10,7 +10,6 @@ import numpy as np
 import shutil
 import random
 import time
-from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -24,7 +23,7 @@ import torchvision.models as models
 from torchvision import datasets, transforms
 from moco_dataloader import MixMatchImageLoader
 from utils import AverageMeter, split_ids, get_tsa_threshold
-from moco_models import MoCoV2, MoCoClassifier, Resnet50, ResnetClassifier, ClassifierBlock
+from moco_models import MoCoV2, MoCoClassifier, Resnet50, ResnetClassifier, ClassifierBlock, ModelEMA
 from baseline.models import Res18_basic, Res50
 from rand_aug.rand_augmentation import RandAugment
 
@@ -145,49 +144,6 @@ class SemiLoss(object):
 
         return Lx, Lu, opts.lambda_u * linear_rampup(epoch, final_epoch)
 
-class ModelEMA(object):
-    def __init__(self, args, model, decay, device='', resume=''):
-        self.ema = deepcopy(model)
-        self.ema.eval()
-        self.decay = decay
-        self.device = device
-        self.wd = args.lr * 5e-4
-        if device:
-            self.ema.to(device=device)
-        self.ema_has_module = hasattr(self.ema, 'module')
-        if resume:
-            self._load_checkpoint(resume)
-        for p in self.ema.parameters():
-            p.requires_grad_(False)
-
-    def _load_checkpoint(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path)
-        assert isinstance(checkpoint, dict)
-        if 'ema_state_dict' in checkpoint:
-            new_state_dict = OrderedDict()
-            for k, v in checkpoint['ema_state_dict'].items():
-                if self.ema_has_module:
-                    name = 'module.' + k if not k.startswith('module') else k
-                else:
-                    name = k
-                new_state_dict[name] = v
-            self.ema.load_state_dict(new_state_dict)
-
-    def update(self, model):
-        needs_module = hasattr(model, 'module') and not self.ema_has_module
-        with torch.no_grad():
-            msd = model.state_dict()
-            for k, ema_v in self.ema.state_dict().items():
-                if needs_module:
-                    k = 'module.' + k
-                model_v = msd[k].detach()
-                if self.device:
-                    model_v = model_v.to(device=self.device)
-                ema_v.copy_(ema_v * self.decay + (1. - self.decay) * model_v)
-                # weight decay
-                if 'bn' not in k:
-                    msd[k] = msd[k] * (1. - self.wd)
-
 
 ### NSML functions
 def _moco_infer(model, root_path, test_loader=None):
@@ -285,6 +241,10 @@ parser.add_argument('--M', type=int, default=2, help = 'magnitude')
 # fixmatch
 parser.add_argument('--use_ema', action='store_true', default=False, help='use EMA model')
 parser.add_argument('--ema-decay', default=0.999, type=float, help='EMA decay rate')
+parser.add_argument('--nesterov', action='store_true', default=False, help='use nesterov momentum')
+parser.add_argument('--use_fixmatch', action='store_true', default=False, help='use fixmatch')
+parser.add_argument('--threshold', type=float, default=0.95, help='threshold')
+parser.add_argument('--fixmatch_co', action='store_true', default=1, help='fixmatch coefficient')
 
 ################################
 
@@ -398,60 +358,84 @@ def main():
         train_ids, val_ids, unl_ids = split_ids(os.path.join(DATASET_PATH, 'train/train_label'), 0.2)
         print(
             'found {} train, {} validation and {} unlabeled images'.format(len(train_ids), len(val_ids), len(unl_ids)))
+        if opts.use_fixmatch:
+            weak_transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomResizedCrop(opts.imsize),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            label_transform = weak_transform
+            unlabel_transform = transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomResizedCrop(opts.imsize),
+                RandAugment(opts.N, opts.M),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            val_transform = weak_transform
+        else:
+            weak_transform = None
+            label_transform = transforms.Compose([
+                RandAugment(opts.N, opts.M) if opts.use_randaug else lambda x: x,
+                transforms.Resize([opts.imsize, opts.imsize]), #opts.imResize
+                transforms.RandomResizedCrop(opts.imsize),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.ColorJitter(brightness= 0.4,contrast=0.4,saturation=0.4, hue= 0.4),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            unlabel_transform = transforms.Compose([
+                RandAugment(opts.N, opts.M) if opts.use_randaug else lambda x: x,
+                transforms.Resize([opts.imsize, opts.imsize]), #opts.imResize
+                transforms.RandomResizedCrop(opts.imsize),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.ColorJitter(brightness= 0.4,contrast=0.4,saturation=0.4, hue= 0.4),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+            val_transform = transforms.Compose([
+                transforms.Resize(opts.imResize),
+                transforms.CenterCrop(opts.imsize),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+
         train_loader = torch.utils.data.DataLoader(
-            MixMatchImageLoader(DATASET_PATH, 'train', train_ids,
-                              transform=transforms.Compose([
-                                  RandAugment(opts.N, opts.M) if opts.use_randaug else lambda x: x,
-                                  transforms.Resize([opts.imsize, opts.imsize]), #opts.imResize
-                                  # transforms.RandomResizedCrop(opts.imsize),
-                                  transforms.RandomHorizontalFlip(),
-                                  transforms.RandomVerticalFlip(),
-                                  transforms.ColorJitter(brightness= 0.4,contrast=0.4,saturation=0.4, hue= 0.4),
-                                  transforms.ToTensor(),
-                                  transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
+            MixMatchImageLoader(DATASET_PATH, 'train', train_ids, transform=label_transform, weak_transform=weak_transform),
             batch_size=opts.batchsize, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
         print('train_loader done')
 
         unlabel_loader = torch.utils.data.DataLoader(
-            MixMatchImageLoader(DATASET_PATH, 'unlabel', unl_ids,
-                              transform=transforms.Compose([
-                                  RandAugment(opts.N, opts.M) if opts.use_randaug else lambda x: x,
-                                  transforms.Resize([opts.imsize, opts.imsize]), #opts.imResize
-                                  # transforms.RandomResizedCrop(opts.imsize),
-                                  transforms.RandomHorizontalFlip(),
-                                  transforms.RandomVerticalFlip(),
-                                  transforms.ColorJitter(brightness= 0.4,contrast=0.4,saturation=0.4, hue= 0.4),
-                                  transforms.ToTensor(),
-                                  transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
+            MixMatchImageLoader(DATASET_PATH, 'unlabel', unl_ids, transform=unlabel_transform, weak_transform=weak_transform),
             batch_size=opts.batchsize, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
         print('unlabel_loader done')
 
         validation_loader = torch.utils.data.DataLoader(
-            MixMatchImageLoader(DATASET_PATH, 'val', val_ids,
-                              transform=transforms.Compose([
-                                  transforms.Resize(opts.imResize),
-                                  transforms.CenterCrop(opts.imsize),
-                                  transforms.ToTensor(),
-                                  transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
+            MixMatchImageLoader(DATASET_PATH, 'val', val_ids, transform=val_transform, weak_transform=weak_transform),
             batch_size=opts.batchsize, shuffle=False, num_workers=4, pin_memory=True, drop_last=False)
         print('validation_loader done')
 
         # Set optimizer
-        optimizer = optim.Adam(model.parameters(), lr=opts.lr)
+
+        if opts.nesterov:
+            optimizer = optim.SGD(model.parameters(), lr=opts.lr, momentum=0.9, nesterov=opts.nesterov)
+        else:
+            optimizer = optim.Adam(model.parameters(), lr=opts.lr)
 
         # INSTANTIATE LOSS CLASS
         train_criterion = SemiLoss()
 
         # INSTANTIATE STEP LEARNING SCHEDULER CLASS
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[50, 80, 120, 150, 180], gamma=0.1, )
-        if opts.use_ema:
-            ema_model = ModelEMA(opts, model, opts.ema_decay, device)
+
+        ema_model = ModelEMA(opts, model, opts.ema_decay, device) if opts.use_ema else None
 
         # Train and Validation
         train_i = 0 # for nsml.report
         val_i = 0
-        global train_i
-        global val_i
 
         best_acc = -1
 
@@ -536,68 +520,84 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         # Transform label to one-hot
         classno = NUM_CLASSES
         targets_org = targets_x
-        targets_x = torch.zeros(batch_size, classno).scatter_(1, targets_x.view(-1, 1), 1)
 
         if use_gpu:
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda()
             inputs_u1, inputs_u2 = inputs_u1.cuda(), inputs_u2.cuda()
-        inputs_x, targets_x = Variable(inputs_x), Variable(targets_x)
-        inputs_u1, inputs_u2 = Variable(inputs_u1), Variable(inputs_u2)
-
-        with torch.no_grad():
-            # compute guessed labels of unlabel samples
-            embed_u1, pred_u1 = model(inputs_u1)
-            embed_u2, pred_u2 = model(inputs_u2)
-            pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
-            pt = pred_u_all ** (1 / opts.T)
-            targets_u = pt / pt.sum(dim=1, keepdim=True)
-            targets_u = targets_u.detach()
 
         # mixup
-        all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2], dim=0)
-        all_targets = torch.cat([targets_x, targets_u, targets_u], dim=0)
+        if opts.use_fixmatch:
+            inputs = torch.cat((inputs_x, inputs_u1, inputs_u2)).cuda()
+            _, logits = model(inputs)
+            logits_x = logits[:batch_size]
+            logits_u_w, logits_u_s = logits[batch_size:].chunk(2)
+            del logits
 
-        lamda = np.random.beta(opts.alpha, opts.alpha)
-        lamda = max(lamda, 1 - lamda)
-        newidx = torch.randperm(all_inputs.size(0))
-        input_a, input_b = all_inputs, all_inputs[newidx]
-        target_a, target_b = all_targets, all_targets[newidx]
+            loss_x = F.cross_entropy(logits_x, targets_x, reduction='mean')
 
-        mixed_input = lamda * input_a + (1 - lamda) * input_b
-        mixed_target = lamda * target_a + (1 - lamda) * target_b
+            pseudo_label = torch.softmax(logits_u_w.detach_(), dim=-1)
+            max_probs, targets_u = torch.max(pseudo_label, dim=-1)
+            mask = max_probs.ge(opts.threshold).float()
 
-        # interleave labeled and unlabed samples between batches to get correct batchnorm calculation
-        mixed_input = list(torch.split(mixed_input, batch_size))
-        mixed_input = interleave(mixed_input, batch_size)
+            loss_un = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
-        optimizer.zero_grad()
+            loss = loss_x + opts.fixmatch_co * loss_un
+        else:
+            targets_x = torch.zeros(batch_size, classno).scatter_(1, targets_x.view(-1, 1), 1)
+            with torch.no_grad():
+                # compute guessed labels of unlabel samples
+                embed_u1, pred_u1 = model(inputs_u1)
+                embed_u2, pred_u2 = model(inputs_u2)
+                pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
+                pt = pred_u_all ** (1 / opts.T)
+                targets_u = pt / pt.sum(dim=1, keepdim=True)
+                targets_u = targets_u.detach()
 
-        fea, logits_temp = model(mixed_input[0])
-        logits = [logits_temp]
-        for newinput in mixed_input[1:]:
-            fea, logits_temp = model(newinput)
-            logits.append(logits_temp)
+            all_inputs = torch.cat([inputs_x, inputs_u1, inputs_u2], dim=0)
+            all_targets = torch.cat([targets_x, targets_u, targets_u], dim=0)
 
-        # put interleaved samples back
-        logits = interleave(logits, batch_size)
-        logits_x = logits[0]
-        logits_u = torch.cat(logits[1:], dim=0)
+            lamda = np.random.beta(opts.alpha, opts.alpha)
+            lamda = max(lamda, 1 - lamda)
+            newidx = torch.randperm(all_inputs.size(0))
+            input_a, input_b = all_inputs, all_inputs[newidx]
+            target_a, target_b = all_targets, all_targets[newidx]
 
-        loss_x, loss_un, weigts_mixing = criterion(logits_x, mixed_target[:batch_size], logits_u,
-                                                   mixed_target[batch_size:], epoch + batch_idx / len(train_loader),
-                                                   opts.epochs,
-                                                   step= int((epoch + batch_idx / len(train_loader)) * (len(train_loader.dataset)/batch_size)),
-                                                   total_steps= int(opts.epochs *(len(train_loader.dataset)/batch_size)),
-                                                   ood_mask_pct=.3, # ood related params : need to tune between .3 and .6
-                                                   is_tsa = opts.use_tsa,
-                                                   is_ood=opts.use_ood
-                                                   )
-        loss = loss_x + weigts_mixing * loss_un
+            mixed_input = lamda * input_a + (1 - lamda) * input_b
+            mixed_target = lamda * target_a + (1 - lamda) * target_b
+
+            # interleave labeled and unlabed samples between batches to get correct batchnorm calculation
+            mixed_input = list(torch.split(mixed_input, batch_size))
+            mixed_input = interleave(mixed_input, batch_size)
+
+            optimizer.zero_grad()
+
+            fea, logits_temp = model(mixed_input[0])
+            logits = [logits_temp]
+            for newinput in mixed_input[1:]:
+                fea, logits_temp = model(newinput)
+                logits.append(logits_temp)
+
+            # put interleaved samples back
+            logits = interleave(logits, batch_size)
+            logits_x = logits[0]
+            logits_u = torch.cat(logits[1:], dim=0)
+
+            loss_x, loss_un, weigts_mixing = criterion(logits_x, mixed_target[:batch_size], logits_u,
+                                                    mixed_target[batch_size:], epoch + batch_idx / len(train_loader),
+                                                    opts.epochs,
+                                                    step= int((epoch + batch_idx / len(train_loader)) * (len(train_loader.dataset)/batch_size)),
+                                                    total_steps= int(opts.epochs *(len(train_loader.dataset)/batch_size)),
+                                                    ood_mask_pct=.3, # ood related params : need to tune between .3 and .6
+                                                    is_tsa = opts.use_tsa,
+                                                    is_ood=opts.use_ood
+                                                    )
+            loss = loss_x + weigts_mixing * loss_un
+
+            weight_scale.update(weigts_mixing, inputs_x.size(0))
 
         losses.update(loss.item(), inputs_x.size(0))
         losses_x.update(loss_x.item(), inputs_x.size(0))
         losses_un.update(loss_un.item(), inputs_x.size(0))
-        weight_scale.update(weigts_mixing, inputs_x.size(0))
 
         # compute gradient and do SGD step
         loss.backward()
@@ -619,9 +619,9 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         avg_top5 += acc_top5b
 
         if batch_idx % opts.log_interval == 0:
-            print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) '.format(
+            print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) loss_x:{:.2f} / loss_un:{:.2f}'.format(
                 epoch, batch_idx * inputs_x.size(0), len(train_loader.dataset), losses.val, losses.avg, acc_top1.val,
-                acc_top1.avg, acc_top5.val, acc_top5.avg))
+                acc_top1.avg, acc_top5.val, acc_top5.avg, losses_x.val, losses_un.val))
 
         nCnt += 1
 
