@@ -525,6 +525,8 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda()
             inputs_u1, inputs_u2 = inputs_u1.cuda(), inputs_u2.cuda()
 
+        optimizer.zero_grad()
+
         # mixup
         if opts.use_fixmatch:
             inputs = torch.cat((inputs_x, inputs_u1, inputs_u2)).cuda()
@@ -568,8 +570,6 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
             # interleave labeled and unlabed samples between batches to get correct batchnorm calculation
             mixed_input = list(torch.split(mixed_input, batch_size))
             mixed_input = interleave(mixed_input, batch_size)
-
-            optimizer.zero_grad()
 
             fea, logits_temp = model(mixed_input[0])
             logits = [logits_temp]
@@ -619,7 +619,7 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
         avg_top5 += acc_top5b
 
         if batch_idx % opts.log_interval == 0:
-            print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) loss_x:{:.2f} / loss_un:{:.2f}'.format(
+            print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) loss_x:{:.4f} / loss_un:{:.4f}'.format(
                 epoch, batch_idx * inputs_x.size(0), len(train_loader.dataset), losses.val, losses.avg, acc_top1.val,
                 acc_top1.avg, acc_top5.val, acc_top5.avg, losses_x.val, losses_un.val))
 
