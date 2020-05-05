@@ -12,10 +12,14 @@ def default_image_loader(path):
     return Image.open(path).convert('RGB')
 
 class TransformTwice:
-    def __init__(self, transform):
+    def __init__(self, transform, weak_transform):
         self.transform = transform
+        self.weak_transform = weak_transform
     def __call__(self, inp):
-        img_q = self.transform(inp)
+        if self.weak_transform != None:
+            img_q = self.weak_transform(inp)
+        else:
+            img_q = self.transform(inp)
         img_k = self.transform(inp)
         return img_q, img_k    
     
@@ -137,3 +141,123 @@ class SupervisedImageLoader(torch.utils.data.Dataset):
         
     def __len__(self):
         return len(self.imnames)
+
+
+class MixMatchImageLoader(torch.utils.data.Dataset):
+    def __init__(self, rootdir, split, ids=None, transform=None, weak_transform=None, loader=default_image_loader):
+        if split == 'test':
+            self.impath = os.path.join(rootdir, 'test_data')
+            meta_file = os.path.join(self.impath, 'test_meta.txt')
+        else:
+            self.impath = os.path.join(rootdir, 'train/train_data')
+            meta_file = os.path.join(rootdir, 'train/train_label')
+
+        imnames = []
+        imclasses = []
+
+        with open(meta_file, 'r') as rf:
+            for i, line in enumerate(rf):
+                if i == 0:
+                    continue
+                instance_id, label, file_name = line.strip().split()
+                if int(label) == -1 and (split != 'unlabel' and split != 'test'):
+                    continue
+                if int(label) != -1 and (split == 'unlabel' or split == 'test'):
+                    continue
+                if (ids is None) or (int(instance_id) in ids):
+                    if os.path.exists(os.path.join(self.impath, file_name)):
+                        imnames.append(file_name)
+                        if split == 'train' or split == 'val':
+                            imclasses.append(int(label))
+
+        self.transform = transform
+        self.TransformTwice = TransformTwice(transform, weak_transform)
+        self.loader = loader
+        self.split = split
+        self.imnames = imnames
+        self.imclasses = imclasses
+
+    def __getitem__(self, index):
+        filename = self.imnames[index]
+        img = self.loader(os.path.join(self.impath, filename))
+
+        if self.split == 'test':
+            if self.transform is not None:
+                img = self.transform(img)
+            return img
+        elif self.split != 'unlabel':
+            if self.transform is not None:
+                img = self.transform(img)
+            label = self.imclasses[index]
+            return img, label
+        else:
+            img1, img2 = self.TransformTwice(img)
+            return img1, img2
+
+    def __len__(self):
+        return len(self.imnames)
+
+    
+
+
+class HardMixMatchImageLoader(torch.utils.data.Dataset):
+    def __init__(self, rootdir, split, ids=None, transform=None, transform_strong=None, loader=default_image_loader):
+        if split == 'test':
+            self.impath = os.path.join(rootdir, 'test_data')
+            meta_file = os.path.join(self.impath, 'test_meta.txt')
+        else:
+            self.impath = os.path.join(rootdir, 'train/train_data')
+            meta_file = os.path.join(rootdir, 'train/train_label')
+
+        imnames = []
+        imclasses = []
+
+        with open(meta_file, 'r') as rf:
+            for i, line in enumerate(rf):
+                if i == 0:
+                    continue
+                instance_id, label, file_name = line.strip().split()
+                if int(label) == -1 and (split != 'unlabel' and split != 'test'):
+                    continue
+                if int(label) != -1 and (split == 'unlabel' or split == 'test'):
+                    continue
+                if (ids is None) or (int(instance_id) in ids):
+                    if os.path.exists(os.path.join(self.impath, file_name)):
+                        imnames.append(file_name)
+                        if split == 'train' or split == 'val':
+                            imclasses.append(int(label))
+
+        self.transform = transform
+        self.TransformTwice = TransformTwice(transform)
+        self.TransformTwice_strong = TransformTwice(transform_strong) if transform_strong else None
+        self.loader = loader
+        self.split = split
+        self.imnames = imnames
+        self.imclasses = imclasses
+        self.four_imgs = True if transform_strong else False
+
+
+    def __getitem__(self, index):
+        filename = self.imnames[index]
+        img = self.loader(os.path.join(self.impath, filename))
+
+        if self.split == 'test':
+            if self.transform is not None:
+                img = self.transform(img)
+            return img
+        elif self.split != 'unlabel':
+            if self.transform is not None:
+                img = self.transform(img)
+            label = self.imclasses[index]
+            return img, label
+        else:
+            img1, img2 = self.TransformTwice(img)
+
+            if self.four_imgs:
+                img1_s, img2_s =  self.TransformTwice_strong(img)
+                return img1, img2, img1_s, img2_s
+            return img1, img2
+
+    def __len__(self):
+        return len(self.imnames)
+

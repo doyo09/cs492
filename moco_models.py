@@ -1,21 +1,26 @@
 import numpy as np
 
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision.models as models
-
+def weights_init_classifier(m):
+    classname = m.__class__.__name__
+    if classname.find('Linear') != -1:
+        nn.init.normal_(m.weight.data, std=0.001)
+        nn.init.constant_(m.bias.data, 0.0)
 
 class MoCoV2(nn.Module):
-    def __init__(self, base_encoder, similarity_dim=128, q_size=128*64, momentum=0.999, temperature=0.07, ):
+    def __init__(self, base_encoder, similarity_dim=128, q_size=200*179, momentum=0.999, temperature=0.07, ):
         super(MoCoV2, self).__init__()
         self.K = q_size
         self.m = momentum
         self.T = temperature
 
-        self.q_enc = base_encoder()  # torchvision.models.__dict__['resnet50']
-        self.k_enc = base_encoder()  # torchvision.models.__dict__['resnet50']
+        self.q_enc = base_encoder(pretrained=True)  # torchvision.models.__dict__['resnet50']
+        self.k_enc = base_encoder(pretrained=True)  # torchvision.models.__dict__['resnet50']
 
         # for mlp
         in_features = self.q_enc.fc.weight.size(1)
@@ -23,6 +28,7 @@ class MoCoV2(nn.Module):
                                       nn.Linear(in_features=in_features, out_features=similarity_dim))
         self.k_enc.fc = nn.Sequential(nn.Linear(in_features, in_features), nn.ReLU(),
                                       nn.Linear(in_features=in_features, out_features=similarity_dim))
+        self.q_enc.apply(weights_init_classifier)
 
         # initialize k_enc params
         for q, k in zip(self.q_enc.parameters(), self.k_enc.parameters()):
@@ -34,6 +40,8 @@ class MoCoV2(nn.Module):
         self.register_buffer("queue_pointer", torch.tensor(0, dtype=torch.long))
 
         self.queue = F.normalize(self.queue, dim=0)
+
+
 
     def forward(self, img_q, img_k):
         """
@@ -89,7 +97,7 @@ class Resnet50(nn.Module):
     def __init__(self, base_encoder, num_classes = 265):
         super(Resnet50, self).__init__()
 
-        self.model_ft = base_encoder()  # torchvision.models.__dict__['resnet50']
+        self.model_ft = base_encoder(pretrained=True)  # torchvision.models.__dict__['resnet50']
 
         # same architecture as moco
         in_features = self.model_ft.fc.weight.size(1)
@@ -97,6 +105,7 @@ class Resnet50(nn.Module):
                                          nn.ReLU(),
                                          nn.Linear(in_features=in_features, out_features=num_classes)
                                          )
+        self.model_ft.apply(weights_init_classifier)
 
     def forward(self, img):
         """
@@ -110,6 +119,7 @@ class LinearProtocol(nn.Module):
     def __init__(self, input_dim = 2048, class_num=265,):  # 512
         super(LinearProtocol, self).__init__()
         self.fc = nn.Linear(in_features= input_dim, out_features= class_num)
+        self.fc.apply(weights_init_classifier)
     def forward(self, x) :
         return self.fc(x)
 
@@ -135,7 +145,8 @@ class ClassifierBlock(nn.Module):
         # classifier.apply(weights_init_classifier)
         self.add_block = add_block
         self.classifier = classifier
-
+        self.add_block.apply(weights_init_classifier)
+        self.classifier.apply(weights_init_classifier)
     def forward(self, x):
         x = self.add_block(x)
         x = self.classifier(x)
@@ -143,7 +154,7 @@ class ClassifierBlock(nn.Module):
 
 # for experiment1 & building the whole model
 class MoCoClassifier(nn.Module):
-    def __init__(self, moco_model, classifier, use_bn = False):
+    def __init__(self, moco_model, classifier, use_bn = False, pretrained = True, init= True):
         """
         @param moco_model : moco_model.q_enc + moco_model.k_enc
         @param classifier : Classifier block for real mix model or Linear for linear protocol
@@ -151,8 +162,13 @@ class MoCoClassifier(nn.Module):
         super(MoCoClassifier, self).__init__()
         self.moco_model = moco_model.q_enc
         self.classifier = classifier
+        self.use_bn = use_bn
         if use_bn :
-            self.BN = nn.BatchNorm1d()
+            self.BN = nn.BatchNorm1d(num_features=2048)
+        if not pretrained :
+            self.moco_model.apply(weights_init_classifier)
+        if init :
+            self.classifier.apply(weights_init_classifier)
 
 
     def forward(self, img):
@@ -161,19 +177,28 @@ class MoCoClassifier(nn.Module):
             x = layer(x)
             if layer_name == "avgpool":
                 break
-        x = F.relu(x.view(x.size(0), -1))
-        x = self.classifier(x)
-        return x
+        if self.use_bn:
+            preds = F.relu(self.BN(x.view(x.size(0), -1)))
+        else :
+            preds = F.relu(x.view(x.size(0), -1))
+        preds = self.classifier(preds)
+        return x, preds
+
 
 class ResnetClassifier(nn.Module):
-    def __init__(self, resnet, classifier):
+    def __init__(self, resnet, classifier, pretrained = False, init= True):
         """
         @param resnet : resnet50
         @param classifier : Classifier block for real mix model or Linear for linear protocol
         """
         super(ResnetClassifier, self).__init__()
         self.resnet = resnet.model_ft
+        if not pretrained :
+            self.resnet.apply(weights_init_classifier)
         self.classifier = classifier
+        if init :
+            self.classifier.apply(weights_init_classifier)
+
 
     def forward(self, img):
         x = img
@@ -181,8 +206,52 @@ class ResnetClassifier(nn.Module):
             x = layer(x)
             if layer_name == "avgpool":
                 break
-        x = F.relu(x.view(x.size(0), -1))
-        x = self.classifier(x)
-        return x
+
+        preds = F.relu(x.view(x.size(0), -1))
+        preds = self.classifier(preds)
+        return x, preds
 
 
+class ModelEMA(object):
+    def __init__(self, args, model, decay, device='', resume=''):
+        self.ema = deepcopy(model)
+        self.ema.eval()
+        self.decay = decay
+        self.device = device
+        self.wd = args.lr * 5e-4
+        if device:
+            self.ema.to(device=device)
+        self.ema_has_module = hasattr(self.ema, 'module')
+        # if resume:
+        #     self._load_checkpoint(resume)
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    # @TODO impl save / load
+    # def _load_checkpoint(self, checkpoint_path):
+    #     checkpoint = torch.load(checkpoint_path)
+    #     assert isinstance(checkpoint, dict)
+    #     if 'ema_state_dict' in checkpoint:
+    #         new_state_dict = OrderedDict()
+    #         for k, v in checkpoint['ema_state_dict'].items():
+    #             if self.ema_has_module:
+    #                 name = 'module.' + k if not k.startswith('module') else k
+    #             else:
+    #                 name = k
+    #             new_state_dict[name] = v
+    #         self.ema.load_state_dict(new_state_dict)
+
+    def update(self, model):
+        # needs_module = hasattr(model, 'module') and not self.ema_has_module
+        with torch.no_grad():
+            msd = model.state_dict()
+            for k, ema_v in self.ema.state_dict().items():
+                # if needs_module:
+                #     k = 'module.' + k
+                model_v = msd[k].detach()
+                if self.device:
+                    model_v = model_v.to(device=self.device)
+                ema_v.copy_(ema_v * self.decay + (1. - self.decay) * model_v)
+                # weight decay
+                if 'bn' not in k:
+                    msd[k] = msd[k] * (1. - self.wd)

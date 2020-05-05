@@ -1,10 +1,17 @@
 from moco_dataloader import MoCoImageLoader
+from baseline.ImageDataLoader import SimpleImageLoader
 import nsml
 
 import os
 import torch
+from torchvision import transforms
+
+
 import numpy as np
 import time
+
+import torch.nn.functional as F
+
 
 class AverageMeter(object):
 
@@ -21,65 +28,58 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
-### NSML functions
-def _moco_infer(model, root_path, val_loader=None):
-    if val_loader is None:
-        val_loader = torch.utils.data.DataLoader(
-            MoCoImageLoader(root_path, 'val', val_ids,
-                            transform=transforms.Compose([
-                                transforms.Resize(opts.imResize),
-                                transforms.RandomResizedCrop(opts.imsize),
-                                # transforms.RandomApply([
-                                #     transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)  # not strengthened
-                                #      ], p=0.8),
-                                transforms.RandomGrayscale(p=0.2),
-                                # gaussian blur should be added
-                                transforms.RandomHorizontalFlip(),
-                                transforms.ToTensor(),
-                                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), ])),
-            batch_size=opts.batch_size, shuffle=False, num_workers = 8,pin_memory=True, drop_last=False)
-        print('loaded {} validation images'.format(len(val_loader.dataset)))
 
-    outputs = []
-    # s_t = time.time()
-    for idx, image in enumerate(test_loader):
-        if torch.cuda.is_available():
-            image = image.cuda()
-        _, probs = model(image)
-        output = torch.argmax(probs, dim=1)
-        output = output.detach().cpu().numpy()
-        outputs.append(output)
+def split_ids(path, ratio):
+    with open(path) as f:
+        ids_l = []
+        ids_u = []
+        cnt = 0
+        for i, line in enumerate(f.readlines()):
+            cnt += 1
+            if i == 0 or line == '' or line == '\n':
+                continue
+            line = line.replace('\n', '').split('\t')
+            if int(line[1]) >= 0:
+                ids_l.append(int(line[0]))
+            else:
+                ids_u.append(int(line[0]))
+    print("length of the file", cnt)
+    ids_l = np.array(ids_l)
+    ids_u = np.array(ids_u)
 
-    outputs = np.concatenate(outputs)
-    return outputs
+    perm = np.random.permutation(np.arange(len(ids_l)))
+    cut = int(ratio * len(ids_l))
+    train_ids = ids_l[perm][cut:]
+    val_ids = ids_l[perm][:cut]
 
-def bind_nsml(model):
-    def save(dir_name, *args, **kwargs):
-        os.makedirs(dir_name, exist_ok=True)
-        state = model.state_dict()
-        torch.save(state, os.path.join(dir_name, 'model.pt'))
-        print('saved')
+    return train_ids, val_ids, ids_u
 
-    def load(dir_name, *args, **kwargs):
-        state = torch.load(os.path.join(dir_name, 'model.pt'))
-        model.load_state_dict(state)
-        print('loaded')
+# TSA
+def get_tsa_threshold(curr_step, total_steps, start = 0, end = None,schedule = "log-schdule", class_num=265):
+    """
+    :param curr_step:
+    :param total_steps:
+    :param start: starting step
+    :param end:
+    :param schedule: log or linear or exp
+    :param class_num: 265
+    :return: threshold
+    """
+    if end is None :
+        end = total_steps
+    # curr_step/total_steps
+    frac_t_T = torch.tensor(curr_step/total_steps, dtype = torch.float32)
+    if schedule.startswith("linear"):
+        alpha_t = frac_t_T
+    elif  schedule.startswith("exp"):
+        scale = 5
+        alpha_t = torch.exp((frac_t_T-1) * scale)
+    elif schedule.startswith("log"):
+        scale = 5
+        alpha_t = 1- torch.exp(-frac_t_T*scale)
+    else :
+        raise ValueError("no schedule")
+    threshold = alpha_t * (1 - 1/class_num) + 1/class_num
 
-    def infer(root_path):
-        return _moco_infer(model, root_path)
-
-    nsml.bind(save=save, load=load, infer=infer)
-
-def top_n_accuracy_score(y_true, y_prob, n=5, normalize=True):
-    num_obs, num_labels = y_prob.shape
-    idx = num_labels - n - 1
-    counter = 0
-    argsorted = np.argsort(y_prob, axis=1)
-    for i in range(num_obs):
-        if y_true[i] in argsorted[i, idx+1:]:
-            counter += 1
-    if normalize:
-        return counter * 1.0 / num_obs
-    else:
-        return counter
+    return threshold
 
