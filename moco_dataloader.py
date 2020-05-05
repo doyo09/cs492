@@ -11,6 +11,14 @@ import torch
 def default_image_loader(path):
     return Image.open(path).convert('RGB')
 
+class TransformTwiceBasic:
+    def __init__(self, transform):
+        self.transform = transform
+    def __call__(self, inp):
+        img_q = self.transform(inp)
+        img_k = self.transform(inp)
+        return img_q, img_k
+
 class TransformTwice:
     def __init__(self, transform, weak_transform):
         self.transform = transform
@@ -22,6 +30,7 @@ class TransformTwice:
             img_q = self.transform(inp)
         img_k = self.transform(inp)
         return img_q, img_k    
+
     
 # all unlabeled data!
 class MoCoImageLoader(torch.utils.data.Dataset):
@@ -228,8 +237,8 @@ class HardMixMatchImageLoader(torch.utils.data.Dataset):
                             imclasses.append(int(label))
 
         self.transform = transform
-        self.TransformTwice = TransformTwice(transform)
-        self.TransformTwice_strong = TransformTwice(transform_strong) if transform_strong else None
+        self.TransformTwice = TransformTwiceBasic(transform)
+        self.TransformTwice_strong = TransformTwiceBasic(transform_strong) if transform_strong else None
         self.loader = loader
         self.split = split
         self.imnames = imnames
