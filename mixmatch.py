@@ -244,7 +244,7 @@ parser.add_argument('--ema-decay', default=0.999, type=float, help='EMA decay ra
 parser.add_argument('--nesterov', action='store_true', default=False, help='use nesterov momentum')
 parser.add_argument('--use_fixmatch', action='store_true', default=False, help='use fixmatch')
 parser.add_argument('--threshold', type=float, default=0.95, help='threshold')
-parser.add_argument('--fixmatch_co', action='store_true', default=1, help='fixmatch coefficient')
+parser.add_argument('--fixmatch_co', type=float, default=1, help='fixmatch coefficient')
 
 ################################
 
