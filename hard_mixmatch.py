@@ -115,7 +115,7 @@ class SemiLoss(object):
     def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, final_epoch,
                  step, total_steps, # tsa related params
                  ood_mask_pct = .3, # ood related params : need to tune between .3 and .6
-                 is_tsa = True, is_ood = True):
+                 is_tsa = True, is_ood = True, CE_unsup = True):
         # sup_loss
         if is_tsa :
             probs_sup = torch.softmax(outputs_x, dim=1) # (N,C)
@@ -142,9 +142,15 @@ class SemiLoss(object):
             ood_moving_threshold =  sorted_probs[sort_index]
             ood_mask = (largest_probs > ood_moving_threshold).type(torch.float32).cuda() # (N,) if false, mask them
 
-            mse_loss = (probs_u - targets_u) ** 2 # (N,C)
-            mse_loss = mse_loss * (ood_mask.unsqueeze(1).expand(mse_loss.size(0), mse_loss.size(1))) # (N,C)
-            Lu = torch.sum(mse_loss) / (torch.sum(ood_mask,) * NUM_CLASSES)
+            if CE_unsup:
+                ce_loss = -torch.sum(torch.sum(torch.log(probs_u) * targets_u, dim=1) * ood_mask) #(N,C) -> (N,) -> ()
+                Lu = ce_loss / torch.sum(ood_mask,)
+
+            else : # MSE
+                mse_loss = (probs_u - targets_u) ** 2 # (N,C)
+                # mse_loss = mse_loss * (ood_mask.unsqueeze(1).expand(mse_loss.size(0), mse_loss.size(1))) # (N,C)
+                mse_loss = torch.sum(mse_loss, dim=1) * ood_mask  # (N)
+                Lu = torch.sum(mse_loss) / (torch.sum(ood_mask,) * NUM_CLASSES)
             # print("sort_index : ", sort_index, ", ood_moving_thrh : ", ood_moving_threshold.item(),
             #       ", we mask ", targets_u.size(0) - torch.sum(ood_mask).item(), "out of ", targets_u.size(0),
             #       ", Lu : ", Lu.item())
@@ -215,11 +221,16 @@ def bind_nsml_ema(model):
         print('student and teacher models saved')
 
     def load(dir_name, *args, **kwargs):
-        state = torch.load(os.path.join(dir_name, 'student.pt'))
-        model[0].load_state_dict(state)
-        state = torch.load(os.path.join(dir_name, 'teacher.pt'))
-        model[1].ema.load_state_dict(state)
-        print('student and teacher models loaded')
+        try :
+            state = torch.load(os.path.join(dir_name, 'student.pt'))
+            model[0].load_state_dict(state)
+            state = torch.load(os.path.join(dir_name, 'teacher.pt'))
+            model[1].ema.load_state_dict(state)
+            print('student and teacher models loaded')
+        except : # when ema doesn't exist
+            state = torch.load(os.path.join(dir_name, 'model.pt'))
+            model[0].load_state_dict(state)
+            print('loaded')
 
     def infer(root_path):
         return _moco_infer(model[1].ema, root_path)
@@ -271,6 +282,7 @@ parser.add_argument('--retrain', action='store_true', default=False, help = 'ret
 
 parser.add_argument('--use_tsa', action='store_true', default=False, help = 'tsa')
 parser.add_argument('--use_ood', action='store_true', default=False, help = 'ood')
+parser.add_argument('--CE_unsup', action='store_true', default=False, help = 'Cross entropy for unsupervised loss')
 
 parser.add_argument('--use_randaug', action='store_true', default=False, help = 'rand augmentation')
 parser.add_argument('--N', type=int,default=1, help = 'num of augmentations')
@@ -386,14 +398,14 @@ def main():
             nsml.save('Res18baseMM_e49')
 
         elif opts.use_ema:
-            nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/397')
-            nsml.save('Res18baseMM_best')
+            nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/383')
+            nsml.save('15thrh_hardMM_e200')
             print("params loaded with saved ema models")
 
         else :
-            nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/362')
-            nsml.save('baseline_best')
-            print("checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/362' is loaded")
+            nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/383')
+            nsml.save('Res18baseMM_best')
+            print("checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/383' is loaded")
 
     ########### when you train pretrained model ###########
     # nsml.load(checkpoint='Res18baseMM_best', session='kaist_11/fashion_eval/118')
@@ -615,7 +627,8 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
             embed_u2, pred_u2 = model(inputs_u2)
             pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2 # (B, C)
             if opts.four_imgs and epoch > 30 : # sharpening or pseudo-label
-                pseudo_label_idx = pred_u_all[torch.arange(pred_u_all.size(0)), targets_org] > opts.thrh
+                pred_u_max_idx = torch.max(pred_u_all, 1)[1] # (B)
+                pseudo_label_idx = pred_u_all[torch.arange(pred_u_all.size(0)), pred_u_max_idx] > opts.thrh
                 pt = pred_u_all ** (1 / opts.T)
                 targets_u = pt / pt.sum(dim=1, keepdim=True)
                 if pseudo_label_idx.any(): # 하나라도 true면 실행
@@ -667,9 +680,10 @@ def train(opts, train_loader, unlabel_loader, model, criterion, optimizer, epoch
                                                    opts.epochs,
                                                    step= int((epoch + batch_idx / len(train_loader)) * (len(train_loader.dataset)/batch_size)),
                                                    total_steps= int(opts.epochs *(len(train_loader.dataset)/batch_size)),
-                                                   ood_mask_pct=.3, # ood related params : need to tune between .3 and .6
+                                                   ood_mask_pct=.6, # ood related params : need to tune between .3 and .6
                                                    is_tsa = opts.use_tsa,
-                                                   is_ood=opts.use_ood
+                                                   is_ood=opts.use_ood,
+                                                   CE_unsup = opts.CE_unsup
                                                    )
         loss = loss_x + weigts_mixing * loss_un
 
