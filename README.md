@@ -15,6 +15,7 @@ nsml run -d fashion_eval -e train.py -a "--fixmatch --batchsize=64 --N=2 --M=10 
 
 
 **hardmixmatch**
+
 with resnet50
 ```
 nsml run -d fashion_eval -e train.py -a "--hardmixmatch --hardmixmatch_threshold .8 --lr .03 --batchsize=64 --N=2 --M=10 --ema --sgd"
