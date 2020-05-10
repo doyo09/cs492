@@ -80,6 +80,7 @@ parser.add_argument('--ema-decay', default=0.999, type=float, help='EMA decay ra
 # hard mixmatch (randaug automatically enabled)
 parser.add_argument('--hardmixmatch', action='store_true', default=False, help='use hard mixmatch')
 parser.add_argument('--hardmixmatch_threshold', type=float, default=0.5, help='threshold')
+parser.add_argument('--hardmixmatch_celoss', action='store_true', default=False, help='use ce loss')
 
 # fixmatch (randaug automatically enabled)
 parser.add_argument('--fixmatch', action='store_true', default=False, help='use fixmatch')
@@ -172,7 +173,7 @@ def main():
 
         # Set optimizer
         if opts.sgd:
-            optimizer = optim.SGD(model.parameters(), lr=opts.lr, momentum=0.9, nesterov=opts.nesterov)
+            optimizer = optim.SGD(model.parameters(), lr=opts.lr, momentum=0.9, nesterov=True)
         else:
             optimizer = optim.Adam(model.parameters(), lr=opts.lr)
 
@@ -204,8 +205,9 @@ def main():
                 release_schedule = release_schedule[1:]
 
             print('start training')
-            loss, train_acc_top1, train_acc_top5, train_i = train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, train_i, ema_model)
-            scheduler.step()
+            loss, train_acc_top1, train_acc_top5, train_i = train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, train_i, ema_model, scheduler)
+            if opts.fixmatch:
+                scheduler.step()
 
             print('start validation')
             if opts.ema:
@@ -231,7 +233,7 @@ def main():
 
 
 
-def train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, train_i, ema_model):
+def train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, train_i, ema_model, scheduler):
     losses = AverageMeter()
     losses_x = AverageMeter()
     losses_un = AverageMeter()
@@ -291,7 +293,7 @@ def train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, 
             rampup_epoch = epoch + batch_idx / len(train_loader)
             step = int((epoch + batch_idx / len(train_loader)) * (len(train_loader.dataset)/batch_size))
             total_steps = int(opts.epochs * (len(train_loader.dataset)/batch_size))
-            loss, loss_x, loss_un = mixup_loss(opts, model, batch_size, rampup_epoch, step, total_steps,
+            loss, loss_x, loss_un, cnt_ge_thrh = mixup_loss(opts, model, batch_size, rampup_epoch, step, total_steps,
                                                 inputs_x, inputs_u1, inputs_u2, inputs_u1_str, inputs_u2_str, targets_x_hot)
 
 
@@ -302,6 +304,8 @@ def train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, 
         # compute gradient and do SGD step
         loss.backward()
         optimizer.step()
+        if opts.hardmixmatch : 
+            scheduler.step()
         if opts.ema:
             ema_model.update(model)
 
@@ -319,7 +323,10 @@ def train(opts, train_loader, unlabel_loader, model, optimizer, epoch, use_gpu, 
         avg_top5 += acc_top5b
 
         if batch_idx % opts.log_interval == 0:
-            print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) loss_x:{:.4f} / loss_un:{:.4f}'.format(
+            if opts.hardmixmatch:
+                print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) loss_x:{:.4f} / loss_un:{:.4f} cnt_ge_thrh:{:f}'.format(epoch, batch_idx * inputs_x.size(0), len(train_loader.dataset), losses.val, losses.avg, acc_top1.val, acc_top1.avg, acc_top5.val, acc_top5.avg, losses_x.val, losses_un.val, cnt_ge_thrh))
+            else: 
+                print('Train Epoch:{} [{}/{}] Loss:{:.4f}({:.4f}) Top-1:{:.2f}%({:.2f}%) Top-5:{:.2f}%({:.2f}%) loss_x:{:.4f} / loss_un:{:.4f}'.format(
                 epoch, batch_idx * inputs_x.size(0), len(train_loader.dataset), losses.val, losses.avg, acc_top1.val,
                 acc_top1.avg, acc_top5.val, acc_top5.avg, losses_x.val, losses_un.val))
 
@@ -362,11 +369,11 @@ def mixup_loss(opts, model, batch_size, epoch, step, total_steps,
         _, pred_u1 = model(inputs_u1)
         _, pred_u2 = model(inputs_u2)
         pred_u_all = (torch.softmax(pred_u1, dim=1) + torch.softmax(pred_u2, dim=1)) / 2
-
+        pseudo_label_idx = None
         # sharpening or pseudo-label
-        if opts.hardmixmatch and epoch > 30:
+        if opts.hardmixmatch and epoch > 20:
             pred_u_max_idx = torch.max(pred_u_all, 1)[1] # (B)
-            pseudo_label_idx = pred_u_all[torch.arange(pred_u_all.size(0)), pred_u_max_idx] > opts.thrh
+            pseudo_label_idx = pred_u_all[torch.arange(pred_u_all.size(0)), pred_u_max_idx] > opts.hardmixmatch_threshold
             pt = pred_u_all ** (1 / opts.T)
             targets_u = pt / pt.sum(dim=1, keepdim=True)
             # 하나라도 true면 실행
@@ -417,7 +424,7 @@ def mixup_loss(opts, model, batch_size, epoch, step, total_steps,
     )
     loss = loss_x + weigts_mixing * loss_un
 
-    return loss, loss_x, loss_un
+    return loss, loss_x, loss_un, torch.sum(pseudo_label_idx).item() if pseudo_label_idx is not None else 0.
 
 
 def mix_criterion(opts, outputs_x, targets_x, outputs_u, targets_u, epoch, step, total_steps, ood_mask_pct = .3):
@@ -446,7 +453,7 @@ def mix_criterion(opts, outputs_x, targets_x, outputs_u, targets_u, epoch, step,
         ood_moving_threshold = sorted_probs[sort_index]
         ood_mask = (largest_probs > ood_moving_threshold).type(torch.float32).cuda() # (N,) if false, mask them
 
-        if opts.hardmixmatch:
+        if opts.hardmixmatch_celoss:
             ce_loss = -torch.sum(torch.sum(torch.log(probs_u) * targets_u, dim=1) * ood_mask) #(N,C) -> (N,) -> ()
             Lu = ce_loss / torch.sum(ood_mask,)
         else:
