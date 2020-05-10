@@ -1,12 +1,10 @@
-# cs492
-## To do 
-### experiment1 끝나고 unlabeled 전체로 moco 다시 훈련!!
-### mixmatch train function 따로 정리
+# CS492(H) DL4RW CV Project
+Semi-supervised learning on naver fashion eval task.
 
-## project ppt 
-* https://docs.google.com/presentation/d/14QiXW20jnQsAUNiDP7hRID9pvzg7SOfCVgIp6968r2A/edit?usp=sharing
+File an issue or contact me if you cannot reproduce a result.
 
-## leader board
-* https://ai.nsml.navercorp.com/leaderboard/fashion_eval
-## log
-* https://ai.nsml.navercorp.com/leaderboard/fashion_eval
+##### Example
+`nsml run -d fashion_eval -e train.py -a "<ARGS>"`
+
+fixmatch
+`nsml run -d fashion_eval -e train.py -a "--fixmatch --batchsize=64 --N=2 --M=10 --ema --sgd"`
